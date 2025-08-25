@@ -1,5 +1,5 @@
 // api/clean-company.js
-// Complete cleaner - no optional chaining
+// Presentation-ready cleaner with fixed structure
 
 import { Client } from '@notionhq/client';
 
@@ -7,453 +7,461 @@ const notion = new Client({
   auth: process.env.NOTION_TOKEN,
 });
 
+// Fixed presentation structure
+const PRESENTATION_STRUCTURE = {
+  tableOfContents: [
+    'I. COMPANY OVERVIEW',
+    '   a. Company Snapshot',
+    '   b. Executive Summary',
+    '   c. Business and Product Description',
+    '   d. Customer Overview',
+    '   e. Core Jobs to be Done',
+    '   f. Customer Success Stories',
+    '   g. Tech Market Map',
+    '   h. Competitive Landscape',
+    'II. CONTROL POINTS ANALYSIS',
+    '   a. Data Gravity Analysis',
+    '   b. Workflow Gravity Analysis',
+    '   c. Account Gravity Analysis',
+    '   d. Network Effects Analysis',
+    '   e. Ecosystem Control Points',
+    '   f. Product Extension Analysis',
+    '   g. Final Score and Classification',
+    'III. STRATEGIC RECOMMENDATIONS'
+  ]
+};
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
     const { pageId } = req.body;
-    console.log('Cleaning request received for:', pageId);
+    console.log('Processing:', pageId);
     
-    const rawContent = await fetchAllNotionContent(pageId);
-    const organizedContent = organizeContent(rawContent);
-    const newPage = await createFullNotionPage(organizedContent);
+    const rawContent = await fetchNotionContent(pageId);
+    const presentationData = createPresentationStructure(rawContent);
+    const newPage = await createPresentationPage(presentationData);
     
     return res.status(200).json({ 
       success: true,
       cleanPageId: newPage.id,
-      cleanPageUrl: newPage.url,
-      message: 'Successfully cleaned content'
+      cleanPageUrl: newPage.url
     });
     
   } catch (error) {
-    console.error('Cleaning error:', error);
-    return res.status(500).json({ 
-      error: error.message,
-      details: 'Check Vercel logs'
-    });
+    console.error('Error:', error);
+    return res.status(500).json({ error: error.message });
   }
 }
 
-async function fetchAllNotionContent(pageId) {
+async function fetchNotionContent(pageId) {
   try {
-    let allContent = '';
+    let content = '';
     let hasMore = true;
-    let startCursor = undefined;
+    let cursor = undefined;
     
     while (hasMore) {
       const response = await notion.blocks.children.list({
         block_id: pageId,
         page_size: 100,
-        start_cursor: startCursor
+        start_cursor: cursor
       });
       
       for (const block of response.results) {
         if (block.type === 'paragraph' && block.paragraph.rich_text) {
-          const text = block.paragraph.rich_text.map(t => t.plain_text).join('');
-          if (text.trim()) allContent += text + '\n';
-        } else if (block.type === 'heading_1' && block.heading_1.rich_text) {
-          const text = block.heading_1.rich_text.map(t => t.plain_text).join('');
-          if (text.trim()) allContent += '\n' + text + '\n';
-        } else if (block.type === 'heading_2' && block.heading_2.rich_text) {
-          const text = block.heading_2.rich_text.map(t => t.plain_text).join('');
-          if (text.trim()) allContent += '\n' + text + '\n';
-        } else if (block.type === 'bulleted_list_item' && block.bulleted_list_item.rich_text) {
-          const text = block.bulleted_list_item.rich_text.map(t => t.plain_text).join('');
-          if (text.trim()) allContent += '• ' + text + '\n';
+          content += block.paragraph.rich_text.map(t => t.plain_text).join('') + '\n';
         }
       }
       
       hasMore = response.has_more;
-      startCursor = response.next_cursor;
+      cursor = response.next_cursor;
     }
     
-    return allContent;
+    return content;
   } catch (error) {
-    throw new Error('Failed to fetch content: ' + error.message);
+    throw new Error('Failed to fetch: ' + error.message);
   }
 }
 
-function organizeContent(raw) {
-  // Extract company name
-  let companyName = 'Company';
-  const companyMatch = raw.match(/([A-Za-z]+\.app)/i);
-  if (companyMatch) {
-    companyName = companyMatch[1];
-  }
+function createPresentationStructure(raw) {
+  // Extract and clean key information
+  const companyName = extractCompanyName(raw);
+  const snapshot = extractSnapshot(raw);
   
-  // Extract year founded
-  let yearFounded = 'Not specified';
-  const yearMatch = raw.match(/Year Founded:\s*(\d{4})|established in\s+(\d{4})/i);
-  if (yearMatch) {
-    yearFounded = yearMatch[1] || yearMatch[2] || 'Not specified';
-  }
+  // Build presentation sections
+  const presentation = {
+    companyName: companyName,
+    snapshot: snapshot,
+    executiveSummary: extractExecutiveSummary(raw),
+    problem: extractAndCleanSection(raw, 'SECTION 3: THE PROBLEM'),
+    solution: extractAndCleanSection(raw, 'SECTION 4: THE SOLUTION'),
+    businessDescription: extractAndCleanSection(raw, 'BUSINESS & PRODUCT DESCRIPTION'),
+    customers: extractAndCleanSection(raw, 'CUSTOMERS|TARGET AUDIENCE'),
+    valueProposition: extractAndCleanSection(raw, 'VALUE PROPOSITION'),
+    useCases: extractAndCleanSection(raw, 'USE CASE'),
+    roi: extractAndCleanSection(raw, 'RETURN ON INVESTMENT'),
+    controlPoints: calculateControlPoints(raw)
+  };
   
-  // Extract location
-  let location = 'Not specified';
-  const locationMatch = raw.match(/Headquarters Location:\s*([^\n]+)|New York,\s*New York/i);
-  if (locationMatch) {
-    location = locationMatch[1] || 'New York, New York';
-  }
-  
-  // Extract funding
-  let funding = 'Not specified';
-  const fundingMatch = raw.match(/Total Funding:\s*([^\n]+)|\$(\d+\s*(?:million|M))/i);
-  if (fundingMatch) {
-    funding = fundingMatch[1] || fundingMatch[2] || 'Not specified';
-  }
-  
-  // Calculate control score
-  let controlScore = 0;
-  if (raw.includes('automat') || raw.includes('workflow')) controlScore += 5;
-  if (raw.includes('data') && raw.includes('centralized')) controlScore += 5;
-  if (raw.includes('membership') || raw.includes('retention')) controlScore += 4.5;
-  if (raw.includes('network') || raw.includes('viral')) controlScore += 4;
-  if (raw.includes('ecosystem') || raw.includes('integration')) controlScore += 4;
-  if (raw.includes('analytics') || raw.includes('AI')) controlScore += 4;
-  
-  let classification = 'POINT SOLUTION';
-  if (controlScore >= 25) classification = 'SYSTEM OF RECORD';
-  else if (controlScore >= 20) classification = 'CORE SAAS';
-  else if (controlScore >= 15) classification = 'SYSTEM OF WORKFLOW';
-  
-  // Extract sections
-  const sections = {};
-  
-  const sectionMarkers = [
-    { key: 'introduction', start: 'SECTION 1: INTRODUCTION', end: 'SECTION 2:' },
-    { key: 'marketContext', start: 'SECTION 2: MARKET CONTEXT', end: 'SECTION 3:' },
-    { key: 'problem', start: 'SECTION 3: THE PROBLEM', end: 'SECTION 4:' },
-    { key: 'solution', start: 'SECTION 4: THE SOLUTION', end: 'SECTION 5:' },
-    { key: 'valueProposition', start: 'SECTION 5: UNIQUE VALUE PROPOSITION', end: 'SECTION 6:' },
-    { key: 'keyFeatures', start: 'SECTION 6: KEY FEATURES', end: 'SECTION 7:' },
-    { key: 'implementation', start: 'SECTION 7: IMPLEMENTATION', end: 'SECTION 8:' },
-    { key: 'whyItMatters', start: 'SECTION 8: WHY THIS MATTERS', end: 'SECTION 9:' },
-    { key: 'targetAudience', start: 'SECTION 9: TARGET AUDIENCE', end: 'SECTION 10:' },
-    { key: 'useCases', start: 'SECTION 10: USE CASE', end: 'SECTION 11:' },
-    { key: 'roi', start: 'SECTION 11: RETURN ON INVESTMENT', end: null },
-    { key: 'foundingStory', start: 'FOUNDING STORY', end: null },
-    { key: 'businessDescription', start: 'BUSINESS & PRODUCT DESCRIPTION', end: null },
-    { key: 'customers', start: 'CUSTOMERS', end: null }
+  return presentation;
+}
+
+function extractCompanyName(raw) {
+  const patterns = [
+    /([A-Za-z]+\.app)/i,
+    /([A-Z][a-zA-Z]+)\s+(?:is|exists|operates)/,
+    /Company Name:\s*([^\n]+)/i
   ];
   
-  for (let i = 0; i < sectionMarkers.length; i++) {
-    const marker = sectionMarkers[i];
-    const startIdx = raw.indexOf(marker.start);
-    if (startIdx !== -1) {
-      const contentStart = startIdx + marker.start.length;
-      let contentEnd = raw.length;
-      
-      if (marker.end) {
-        const endIdx = raw.indexOf(marker.end, contentStart);
-        if (endIdx !== -1) contentEnd = endIdx;
-      }
-      
-      sections[marker.key] = raw.substring(contentStart, contentEnd).trim();
-    }
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match) return match[1];
   }
-  
-  return {
-    companyName: companyName,
-    yearFounded: yearFounded,
-    location: location,
-    funding: funding,
-    controlScore: controlScore,
-    classification: classification,
-    sections: sections
+  return 'Company';
+}
+
+function extractSnapshot(raw) {
+  const snapshot = {
+    yearFounded: 'Not specified',
+    location: 'Not specified',
+    funding: 'Not specified',
+    vertical: 'Vertical SaaS Platform',
+    fteCount: 'Not specified'
   };
+  
+  // Year Founded
+  const yearMatch = raw.match(/(?:Year Founded|established in|Founded):\s*(\d{4})/i);
+  if (yearMatch) snapshot.yearFounded = yearMatch[1];
+  
+  // Location  
+  const locationMatch = raw.match(/(?:Headquarters|Location|based in):\s*([^\n]+)/i);
+  if (locationMatch) snapshot.location = locationMatch[1].trim();
+  else if (raw.includes('New York')) snapshot.location = 'New York, New York';
+  
+  // Funding
+  const fundingMatch = raw.match(/(?:Total Funding|raised):\s*\$?([^\n]+)/i);
+  if (fundingMatch) snapshot.funding = fundingMatch[1].trim();
+  
+  // Vertical
+  if (raw.includes('sports facility')) snapshot.vertical = 'Sports Facility Management Platform';
+  else if (raw.includes('racket sports')) snapshot.vertical = 'Racket Sports Management Platform';
+  
+  return snapshot;
 }
 
-async function createFullNotionPage(data) {
-  try {
-    const blocks = [];
-    
-    // Title
-    blocks.push({
-      object: 'block',
-      type: 'heading_1',
-      heading_1: {
-        rich_text: [{
-          type: 'text',
-          text: { content: 'COMPANY OVERVIEW: ' + data.companyName.toUpperCase() },
-          annotations: { bold: true }
-        }]
-      }
-    });
-    
-    // Table of Contents
-    blocks.push({
-      object: 'block',
-      type: 'heading_2',
-      heading_2: {
-        rich_text: [{
-          type: 'text',
-          text: { content: 'TABLE OF CONTENTS' }
-        }]
-      }
-    });
-    
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: {
-        rich_text: [{
-          type: 'text',
-          text: { content: 'I. COMPANY OVERVIEW\nII. BUSINESS AND PRODUCT DESCRIPTION\nIII. CUSTOMER OVERVIEW\nIV. COMPETITIVE LANDSCAPE\nV. CONTROL POINTS ANALYSIS' }
-        }]
-      }
-    });
-    
-    blocks.push({ object: 'block', type: 'divider', divider: {} });
-    
-    // Company Snapshot
-    blocks.push({
-      object: 'block',
-      type: 'heading_1',
-      heading_1: {
-        rich_text: [{
-          type: 'text',
-          text: { content: 'COMPANY SNAPSHOT' }
-        }]
-      }
-    });
-    
-    const snapshotText = 'Company Name: ' + data.companyName + '\n' +
-                         'Year Founded: ' + data.yearFounded + '\n' +
-                         'Location: ' + data.location + '\n' +
-                         'Website: ' + data.companyName.toLowerCase() + '\n' +
-                         'Software Category & Vertical: Sports Facility Management Platform\n' +
-                         'FTE Count: Not specified\n' +
-                         'Funding History: ' + data.funding;
-    
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: {
-        rich_text: [{
-          type: 'text',
-          text: { content: snapshotText }
-        }]
-      }
-    });
-    
-    blocks.push({
-      object: 'block',
-      type: 'callout',
-      callout: {
-        rich_text: [{
-          type: 'text',
-          text: { 
-            content: 'CONTROL POINTS: FINAL SCORE: ' + data.controlScore + ' / 30 ——> ' + data.classification
-          },
-          annotations: { bold: true }
-        }],
-        icon: { type: 'emoji', emoji: '⭐' }
-      }
-    });
-    
-    blocks.push({ object: 'block', type: 'divider', divider: {} });
-    
-    // Add sections
-    if (data.sections.introduction) {
-      blocks.push({
-        object: 'block',
-        type: 'heading_1',
-        heading_1: {
-          rich_text: [{
-            type: 'text',
-            text: { content: 'EXECUTIVE SUMMARY' }
-          }]
-        }
-      });
-      
-      addContentBlocks(blocks, data.sections.introduction);
-    }
-    
-    if (data.sections.problem) {
-      blocks.push({
-        object: 'block',
-        type: 'heading_1',
-        heading_1: {
-          rich_text: [{
-            type: 'text',
-            text: { content: 'THE PROBLEM' }
-          }]
-        }
-      });
-      
-      addContentBlocks(blocks, data.sections.problem);
-    }
-    
-    if (data.sections.solution) {
-      blocks.push({
-        object: 'block',
-        type: 'heading_1',
-        heading_1: {
-          rich_text: [{
-            type: 'text',
-            text: { content: 'THE SOLUTION' }
-          }]
-        }
-      });
-      
-      addContentBlocks(blocks, data.sections.solution);
-    }
-    
-    if (data.sections.businessDescription) {
-      blocks.push({
-        object: 'block',
-        type: 'heading_1',
-        heading_1: {
-          rich_text: [{
-            type: 'text',
-            text: { content: 'BUSINESS AND PRODUCT DESCRIPTION' }
-          }]
-        }
-      });
-      
-      addContentBlocks(blocks, data.sections.businessDescription);
-    }
-    
-    if (data.sections.customers) {
-      blocks.push({
-        object: 'block',
-        type: 'heading_1',
-        heading_1: {
-          rich_text: [{
-            type: 'text',
-            text: { content: 'CUSTOMER OVERVIEW' }
-          }]
-        }
-      });
-      
-      addContentBlocks(blocks, data.sections.customers);
-    }
-    
-    // Create page with first 100 blocks
-    const response = await notion.pages.create({
-      parent: { 
-        page_id: process.env.NOTION_CLEANED_PARENT_PAGE_ID 
-      },
-      icon: {
-        type: 'emoji',
-        emoji: '✨'
-      },
-      cover: {
-        type: 'external',
-        external: {
-          url: 'https://images.unsplash.com/photo-1557804506-669a67965ba0?w=1200&h=300&fit=crop'
-        }
-      },
-      properties: {
-        title: {
-          title: [{
-            text: {
-              content: data.companyName + ' - Cleaned'
-            }
-          }]
-        }
-      },
-      children: blocks.slice(0, 100)
-    });
-    
-    // Add remaining blocks if over 100
-    if (blocks.length > 100) {
-      for (let i = 100; i < blocks.length; i += 100) {
-        const chunk = blocks.slice(i, Math.min(i + 100, blocks.length));
-        await notion.blocks.children.append({
-          block_id: response.id,
-          children: chunk
-        });
-      }
-    }
-    
-    return response;
-    
-  } catch (error) {
-    throw new Error('Failed to create page: ' + error.message);
+function extractExecutiveSummary(raw) {
+  // Get the introduction and clean it up
+  const intro = extractAndCleanSection(raw, 'SECTION 1: INTRODUCTION');
+  if (intro) {
+    // Take first 2-3 sentences as executive summary
+    const sentences = intro.split(/(?<=[.!?])\s+/);
+    return sentences.slice(0, 3).join(' ');
   }
+  
+  // Fallback: look for mission statement
+  const missionMatch = raw.match(/mission is[^.]+\./i);
+  if (missionMatch) return missionMatch[0];
+  
+  return 'Company overview to be added.';
 }
 
-function addContentBlocks(blocks, content) {
-  if (!content) return;
+function extractAndCleanSection(raw, sectionPattern) {
+  const regex = new RegExp(sectionPattern + '[^]*?(?=SECTION \\d+:|FOUNDING STORY|BUSINESS & PRODUCT|CUSTOMERS|$)', 'i');
+  const match = raw.match(regex);
   
-  // Split by double newlines
-  const paragraphs = content.split('\n\n');
+  if (!match) return '';
   
-  for (let i = 0; i < paragraphs.length; i++) {
-    const para = paragraphs[i].trim();
-    if (!para) continue;
-    
-    // Handle bullet points
-    if (para.includes('•')) {
-      const bullets = para.split('•');
-      for (let j = 0; j < bullets.length; j++) {
-        const bullet = bullets[j].trim();
-        if (bullet) {
-          blocks.push({
-            object: 'block',
-            type: 'bulleted_list_item',
-            bulleted_list_item: {
-              rich_text: [{
-                type: 'text',
-                text: { content: bullet }
-              }]
-            }
-          });
-        }
-      }
+  let content = match[0];
+  
+  // Remove the section header
+  content = content.replace(new RegExp(sectionPattern + ':?', 'i'), '');
+  
+  // Clean up the content
+  content = cleanText(content);
+  
+  return content;
+}
+
+function cleanText(text) {
+  // Remove excessive whitespace
+  text = text.replace(/\s+/g, ' ');
+  
+  // Fix bullet points
+  text = text.replace(/[•·]/g, '•');
+  
+  // Remove duplicate sentences (common in Clay data)
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const unique = [...new Set(sentences)];
+  text = unique.join(' ');
+  
+  // Format numbered lists properly
+  text = text.replace(/(\d+)\.\s+/g, '\n$1. ');
+  
+  // Format bullet points properly  
+  text = text.replace(/•\s*/g, '\n• ');
+  
+  // Clean up multiple newlines
+  text = text.replace(/\n{3,}/g, '\n\n');
+  
+  return text.trim();
+}
+
+function calculateControlPoints(raw) {
+  const scores = {
+    dataGravity: 0,
+    workflowGravity: 0,
+    accountGravity: 0,
+    networkEffects: 0,
+    ecosystem: 0,
+    productExtension: 0
+  };
+  
+  // Score based on keywords (simplified)
+  if (raw.match(/centralized|unified|single.*source|data.*repository/i)) scores.dataGravity = 4.5;
+  if (raw.match(/automat|workflow|streamlin|process/i)) scores.workflowGravity = 4.5;
+  if (raw.match(/membership|retention|customer.*satisfaction/i)) scores.accountGravity = 4;
+  if (raw.match(/network|viral|social|collaborat/i)) scores.networkEffects = 3.5;
+  if (raw.match(/ecosystem|integrat|platform|API/i)) scores.ecosystem = 4;
+  if (raw.match(/AI|machine.*learning|analytics|predictive/i)) scores.productExtension = 4;
+  
+  const total = Object.values(scores).reduce((a, b) => a + b, 0);
+  
+  let classification = 'POINT SOLUTION';
+  if (total >= 25) classification = 'SYSTEM OF RECORD';
+  else if (total >= 20) classification = 'CORE SAAS';
+  else if (total >= 15) classification = 'SYSTEM OF WORKFLOW';
+  
+  return { scores, total, classification };
+}
+
+async function createPresentationPage(data) {
+  const blocks = [];
+  
+  // Title
+  blocks.push({
+    object: 'block',
+    type: 'heading_1',
+    heading_1: {
+      rich_text: [{
+        type: 'text',
+        text: { content: 'COMPANY OVERVIEW: ' + data.companyName.toUpperCase() },
+        annotations: { bold: true }
+      }]
     }
-    // Handle numbered lists
-    else if (para.match(/^\d+\./)) {
-      const text = para.replace(/^\d+\.\s*/, '').trim();
+  });
+  
+  // Fixed Table of Contents
+  blocks.push({
+    object: 'block',
+    type: 'heading_2',
+    heading_2: {
+      rich_text: [{
+        type: 'text',
+        text: { content: 'TABLE OF CONTENTS' }
+      }]
+    }
+  });
+  
+  blocks.push({
+    object: 'block',
+    type: 'paragraph',
+    paragraph: {
+      rich_text: [{
+        type: 'text',
+        text: { content: PRESENTATION_STRUCTURE.tableOfContents.join('\n') }
+      }]
+    }
+  });
+  
+  blocks.push({ object: 'block', type: 'divider', divider: {} });
+  
+  // Company Snapshot
+  blocks.push({
+    object: 'block',
+    type: 'heading_1',
+    heading_1: {
+      rich_text: [{
+        type: 'text',
+        text: { content: 'COMPANY SNAPSHOT' }
+      }]
+    }
+  });
+  
+  const snapshotText = [
+    'Company Name: ' + data.companyName,
+    'Year Founded: ' + data.snapshot.yearFounded,
+    'Location: ' + data.snapshot.location,
+    'Website: ' + data.companyName.toLowerCase().replace(/\s+/g, ''),
+    'Software Category & Vertical: ' + data.snapshot.vertical,
+    'FTE Count: ' + data.snapshot.fteCount,
+    'Funding History: ' + data.snapshot.funding
+  ].join('\n');
+  
+  blocks.push({
+    object: 'block',
+    type: 'paragraph',
+    paragraph: {
+      rich_text: [{
+        type: 'text',
+        text: { content: snapshotText }
+      }]
+    }
+  });
+  
+  // Control Points Callout
+  blocks.push({
+    object: 'block',
+    type: 'callout',
+    callout: {
+      rich_text: [{
+        type: 'text',
+        text: { 
+          content: 'CONTROL POINTS: FINAL SCORE: ' + data.controlPoints.total.toFixed(1) + ' / 30 ——> ' + data.controlPoints.classification
+        },
+        annotations: { bold: true }
+      }],
+      icon: { type: 'emoji', emoji: '⭐' }
+    }
+  });
+  
+  blocks.push({ object: 'block', type: 'divider', divider: {} });
+  
+  // Executive Summary
+  if (data.executiveSummary) {
+    blocks.push({
+      object: 'block',
+      type: 'heading_1',
+      heading_1: {
+        rich_text: [{
+          type: 'text',
+          text: { content: 'EXECUTIVE SUMMARY' }
+        }]
+      }
+    });
+    
+    blocks.push({
+      object: 'block',
+      type: 'paragraph',
+      paragraph: {
+        rich_text: [{
+          type: 'text',
+          text: { content: data.executiveSummary }
+        }]
+      }
+    });
+  }
+  
+  // Problem & Solution sections
+  const sections = [
+    { title: 'THE PROBLEM', content: data.problem },
+    { title: 'THE SOLUTION', content: data.solution },
+    { title: 'BUSINESS AND PRODUCT DESCRIPTION', content: data.businessDescription },
+    { title: 'CUSTOMER OVERVIEW', content: data.customers },
+    { title: 'VALUE PROPOSITION', content: data.valueProposition },
+    { title: 'USE CASES', content: data.useCases },
+    { title: 'RETURN ON INVESTMENT', content: data.roi }
+  ];
+  
+  for (const section of sections) {
+    if (section.content) {
+      blocks.push({
+        object: 'block',
+        type: 'heading_1',
+        heading_1: {
+          rich_text: [{
+            type: 'text',
+            text: { content: section.title }
+          }]
+        }
+      });
+      
+      // Add content as formatted blocks
+      formatContentBlocks(blocks, section.content);
+    }
+  }
+  
+  // Create the page
+  const response = await notion.pages.create({
+    parent: { page_id: process.env.NOTION_CLEANED_PARENT_PAGE_ID },
+    icon: { type: 'emoji', emoji: '✨' },
+    cover: {
+      type: 'external',
+      external: {
+        url: 'https://images.unsplash.com/photo-1557804506-669a67965ba0?w=1200&h=300&fit=crop'
+      }
+    },
+    properties: {
+      title: {
+        title: [{
+          text: { content: data.companyName + ' - Cleaned' }
+        }]
+      }
+    },
+    children: blocks.slice(0, 100)
+  });
+  
+  // Add remaining blocks if needed
+  if (blocks.length > 100) {
+    for (let i = 100; i < blocks.length; i += 100) {
+      await notion.blocks.children.append({
+        block_id: response.id,
+        children: blocks.slice(i, Math.min(i + 100, blocks.length))
+      });
+    }
+  }
+  
+  return response;
+}
+
+function formatContentBlocks(blocks, content) {
+  // Split content into proper blocks
+  const lines = content.split('\n');
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    
+    if (trimmed.startsWith('•')) {
+      // Bullet point
+      blocks.push({
+        object: 'block',
+        type: 'bulleted_list_item',
+        bulleted_list_item: {
+          rich_text: [{
+            type: 'text',
+            text: { content: trimmed.substring(1).trim() }
+          }]
+        }
+      });
+    } else if (trimmed.match(/^\d+\./)) {
+      // Numbered list
       blocks.push({
         object: 'block',
         type: 'numbered_list_item',
         numbered_list_item: {
           rich_text: [{
             type: 'text',
-            text: { content: text }
+            text: { content: trimmed.replace(/^\d+\.\s*/, '') }
           }]
         }
       });
-    }
-    // Regular paragraphs
-    else {
-      // Split if too long for Notion (max 2000 chars)
-      if (para.length > 1900) {
-        const chunks = [];
-        let current = '';
-        const sentences = para.split('. ');
-        
-        for (let s = 0; s < sentences.length; s++) {
-          const sentence = sentences[s] + (s < sentences.length - 1 ? '.' : '');
-          if (current.length + sentence.length > 1900) {
-            if (current) chunks.push(current.trim());
-            current = sentence;
-          } else {
-            current += (current ? ' ' : '') + sentence;
-          }
-        }
-        
-        if (current) chunks.push(current.trim());
-        
-        for (let c = 0; c < chunks.length; c++) {
+    } else {
+      // Regular paragraph
+      // Split if too long
+      if (trimmed.length > 1900) {
+        const chunks = trimmed.match(/.{1,1900}/g) || [];
+        for (const chunk of chunks) {
           blocks.push({
             object: 'block',
             type: 'paragraph',
             paragraph: {
               rich_text: [{
                 type: 'text',
-                text: { content: chunks[c] }
+                text: { content: chunk }
               }]
             }
           });
@@ -465,7 +473,7 @@ function addContentBlocks(blocks, content) {
           paragraph: {
             rich_text: [{
               type: 'text',
-              text: { content: para }
+              text: { content: trimmed }
             }]
           }
         });
