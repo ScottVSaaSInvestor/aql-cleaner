@@ -1,5 +1,5 @@
 // api/clean-company.js
-// This is your Vercel serverless function for cleaning Clay data
+// Updated cleaner for Clay narrative text format
 
 import { Client } from '@notionhq/client';
 
@@ -8,18 +8,16 @@ const notion = new Client({
   auth: process.env.NOTION_TOKEN,
 });
 
-// Main handler function - this is what Vercel calls
+// Main handler function
 export default async function handler(req, res) {
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   
-  // Handle preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
   
-  // Only accept POST requests
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -41,7 +39,6 @@ export default async function handler(req, res) {
     // Create new clean page in Notion
     const newPage = await createCleanNotionPage(cleanedData);
     
-    // Return success with new page URL
     return res.status(200).json({ 
       success: true,
       cleanPageId: newPage.id,
@@ -71,15 +68,14 @@ async function fetchNotionContent(pageId) {
       if (block.type === 'paragraph' && block.paragraph.rich_text) {
         content += block.paragraph.rich_text.map(t => t.plain_text).join('') + '\n';
       }
-      // Add other block types as needed
       if (block.type === 'heading_1' && block.heading_1.rich_text) {
-        content += '# ' + block.heading_1.rich_text.map(t => t.plain_text).join('') + '\n';
+        content += block.heading_1.rich_text.map(t => t.plain_text).join('') + '\n';
       }
       if (block.type === 'heading_2' && block.heading_2.rich_text) {
-        content += '## ' + block.heading_2.rich_text.map(t => t.plain_text).join('') + '\n';
+        content += block.heading_2.rich_text.map(t => t.plain_text).join('') + '\n';
       }
       if (block.type === 'bulleted_list_item' && block.bulleted_list_item.rich_text) {
-        content += '- ' + block.bulleted_list_item.rich_text.map(t => t.plain_text).join('') + '\n';
+        content += block.bulleted_list_item.rich_text.map(t => t.plain_text).join('') + '\n';
       }
     }
     
@@ -89,7 +85,7 @@ async function fetchNotionContent(pageId) {
   }
 }
 
-// Main cleaning function
+// Main cleaning function - updated for narrative text
 function cleanCompanyData(rawContent) {
   const cleaned = {
     companyName: extractCompanyName(rawContent),
@@ -105,36 +101,46 @@ function cleanCompanyData(rawContent) {
     controlPointsScore: calculateControlPoints(rawContent),
   };
   
-  // Add classification based on score
   cleaned.classification = getClassification(cleaned.controlPointsScore);
   
   return cleaned;
 }
 
-// Extract company name
+// Extract company name from narrative text
 function extractCompanyName(raw) {
+  // Look for patterns like "CompanyName.app exists" or "CompanyName operates"
   const patterns = [
-    /Company Name:\s*([^\n]+)/i,
-    /^([A-Z][A-Za-z\s\-\.]+?)(?:\s+is\s+a\s+)/m,
-    /COMPANY OVERVIEW:\s*([^\n]+)/i
+    /([A-Za-z]+\.app)\s+exists/i,
+    /([A-Za-z]+\.app)\s+is/i,
+    /([A-Za-z]+\.app)\s+operates/i,
+    /([A-Za-z]+\.app)\s+delivers/i,
+    /([A-Za-z]+\.app)\s+provides/i,
+    /for\s+([A-Za-z]+\.app)/i
   ];
   
   for (const pattern of patterns) {
     const match = raw.match(pattern);
     if (match && match[1]) {
-      return match[1].trim();
+      return match[1];
     }
   }
+  
+  // Fallback: look for any .app domain
+  const appMatch = raw.match(/([A-Za-z]+\.app)/i);
+  if (appMatch) return appMatch[1];
+  
   return 'Company Name Not Found';
 }
 
-// Extract year founded
+// Extract year founded from narrative text
 function extractYearFounded(raw) {
+  // Look for explicit year founded patterns
   const patterns = [
-    /Founded:?\s*(\d{4})/i,
-    /Year Founded:?\s*(\d{4})/i,
-    /Founded in\s+(\d{4})/i,
-    /established in\s+(\d{4})/i
+    /Year Founded:\s*(\d{4})/i,
+    /Founded:\s*(\d{4})/i,
+    /established\s+in\s+(\d{4})/i,
+    /In\s+(\d{4}),\s+[\w\.]+ was/i,
+    /officially established in[^0-9]*(\d{4})/i
   ];
   
   for (const pattern of patterns) {
@@ -146,13 +152,14 @@ function extractYearFounded(raw) {
   return 'Not specified';
 }
 
-// Extract location
+// Extract location from narrative text
 function extractLocation(raw) {
+  // Look for headquarters patterns
   const patterns = [
-    /Location:\s*([^\n]+)/i,
+    /Headquarters Location:\s*([^\n]+)/i,
     /Headquarters:\s*([^\n]+)/i,
-    /headquartered in\s+([^\n,]+(?:,\s*[^\n,]+)?)/i,
-    /based in\s+([^\n,]+(?:,\s*[^\n,]+)?)/i
+    /based in\s+([^,\n]+,\s*[^,\n]+)/i,
+    /located in\s+([^,\n]+,\s*[^,\n]+)/i
   ];
   
   for (const pattern of patterns) {
@@ -161,11 +168,22 @@ function extractLocation(raw) {
       return match[1].trim();
     }
   }
+  
+  // Specific location matching
+  if (raw.includes('New York, New York')) return 'New York, New York';
+  if (raw.includes('New York, NY')) return 'New York, New York';
+  
   return 'Not specified';
 }
 
 // Extract website
 function extractWebsite(raw) {
+  // Extract company name first and use as website
+  const companyName = extractCompanyName(raw);
+  if (companyName && companyName.includes('.app')) {
+    return companyName.toLowerCase();
+  }
+  
   const patterns = [
     /Website:\s*(https?:\/\/[^\s\n]+)/i,
     /(?:www\.)?([a-z0-9\-]+\.[a-z]{2,})/i
@@ -180,13 +198,24 @@ function extractWebsite(raw) {
   return 'Not specified';
 }
 
-// Extract vertical/category
+// Extract vertical from narrative text
 function extractVertical(raw) {
+  // Look for specific vertical descriptions
+  if (raw.includes('sports facility management') || raw.includes('sports and recreation')) {
+    return 'Sports Facility Management Platform';
+  }
+  if (raw.includes('racket sports')) {
+    return 'Racket Sports Management Platform';
+  }
+  if (raw.includes('autonomous') && raw.includes('venue')) {
+    return 'Autonomous Venue Management Platform';
+  }
+  
+  // Look for explicit vertical mentions
   const patterns = [
-    /Software Category[^:]*:\s*([^\n]+)/i,
-    /Vertical:\s*([^\n]+)/i,
-    /Category:\s*([^\n]+)/i,
-    /specialized.*?platform for\s+([^\n\.]+)/i
+    /categorized as[^:]*:\s*([^\n.]+)/i,
+    /Vertical SaaS.*?for\s+([^\n.]+)/i,
+    /platform for\s+([^\n.]+)/i
   ];
   
   for (const pattern of patterns) {
@@ -195,21 +224,23 @@ function extractVertical(raw) {
       return match[1].trim();
     }
   }
-  return 'Vertical SaaS';
+  
+  return 'Vertical SaaS Platform';
 }
 
-// Extract funding
+// Extract funding from narrative text
 function extractFunding(raw) {
   const patterns = [
-    /Total Funding[^:]*:\s*([^\n]+)/i,
-    /raised.*?\$([0-9,]+(?:\.[0-9]+)?[MBK]?)/i,
-    /Funding.*?:\s*\$([^\n]+)/i
+    /Total Funding:\s*\$([^\n]+)/i,
+    /Total Funding:\s*([^\n]+)/i,
+    /\$(\d+(?:\.\d+)?\s*(?:million|Million|M))\s*\(Series [A-Z]\)/i,
+    /raised\s+\$([^\n\)]+)/i
   ];
   
   for (const pattern of patterns) {
     const match = raw.match(pattern);
     if (match && match[1]) {
-      return match[1];
+      return match[1].trim();
     }
   }
   return 'Not specified';
@@ -218,6 +249,7 @@ function extractFunding(raw) {
 // Extract FTE count
 function extractFTECount(raw) {
   const patterns = [
+    /Current Employee Count:\s*([^\n]+)/i,
     /Employee Count:\s*([0-9,]+)/i,
     /FTE.*?:\s*([0-9,]+)/i,
     /(\d+)\s+employees/i
@@ -226,13 +258,15 @@ function extractFTECount(raw) {
   for (const pattern of patterns) {
     const match = raw.match(pattern);
     if (match && match[1]) {
-      return match[1];
+      const count = match[1].trim();
+      if (count.includes('Not Available')) return 'Not specified';
+      return count;
     }
   }
   return 'Not specified';
 }
 
-// Extract executive summary
+// Extract executive summary from narrative sections
 function extractExecutiveSummary(raw) {
   const summary = {
     challenge: '',
@@ -240,206 +274,155 @@ function extractExecutiveSummary(raw) {
     impact: ''
   };
   
-  // Extract challenge
-  const challengeMatch = raw.match(/(?:The\s+)?Challenge:([^]*?)(?=The\s+Solution:|Solution:|Customer|$)/i);
-  if (challengeMatch) {
-    summary.challenge = challengeMatch[1].trim().substring(0, 500);
+  // Extract THE PROBLEM section
+  const problemMatch = raw.match(/SECTION 3: THE PROBLEM([^]*?)(?=SECTION|$)/i);
+  if (problemMatch) {
+    const problemText = problemMatch[1].trim();
+    // Get first major problem point
+    const firstProblem = problemText.match(/1\.\s*([^]+?)(?=\n2\.|$)/);
+    if (firstProblem) {
+      summary.challenge = firstProblem[1].trim().substring(0, 500);
+    } else {
+      summary.challenge = problemText.substring(0, 500);
+    }
   }
   
-  // Extract solution
-  const solutionMatch = raw.match(/(?:The\s+)?Solution:([^]*?)(?=Customer|Results|Impact|$)/i);
+  // Extract THE SOLUTION section
+  const solutionMatch = raw.match(/SECTION 4: THE SOLUTION([^]*?)(?=SECTION|$)/i);
   if (solutionMatch) {
-    summary.solution = solutionMatch[1].trim().substring(0, 500);
+    const solutionText = solutionMatch[1].trim();
+    // Get the main solution description
+    const mainSolution = solutionText.split('•')[0];
+    summary.solution = mainSolution.trim().substring(0, 500);
   }
   
-  // Extract impact
-  const impactMatch = raw.match(/(?:Customer\s+)?Success:([^]*?)(?=\n#|$)/i);
-  if (impactMatch) {
-    summary.impact = impactMatch[1].trim().substring(0, 500);
+  // Extract impact/ROI section
+  const roiMatch = raw.match(/RETURN ON INVESTMENT([^]*?)(?=SECTION|$)/i);
+  if (roiMatch) {
+    const roiText = roiMatch[1].trim();
+    summary.impact = roiText.substring(0, 500);
+  } else {
+    // Fallback to mission statement
+    const missionMatch = raw.match(/mission is[^.]+\./i);
+    if (missionMatch) {
+      summary.impact = missionMatch[0];
+    }
   }
   
   return summary;
 }
 
-// Extract business description
+// Extract business description from narrative
 function extractBusinessDescription(raw) {
-  const businessMatch = raw.match(/Business.*?Description:([^]*?)(?=Customer|#|$)/i);
+  // Look for BUSINESS & PRODUCT DESCRIPTION section
+  const businessMatch = raw.match(/BUSINESS & PRODUCT DESCRIPTION([^]*?)(?=\n\d+\.|SECTION|$)/i);
   if (businessMatch) {
     return businessMatch[1].trim().substring(0, 1000);
   }
   
-  // Fallback: look for company description patterns
-  const descPatterns = [
-    /is\s+a\s+([^.]+platform[^.]+\.)/i,
-    /provides\s+([^.]+solution[^.]+\.)/i,
-    /offers\s+([^.]+software[^.]+\.)/i
-  ];
-  
-  for (const pattern of descPatterns) {
-    const match = raw.match(pattern);
-    if (match) {
-      return match[0];
-    }
+  // Fallback to INTRODUCTION section
+  const introMatch = raw.match(/SECTION 1: INTRODUCTION([^]*?)(?=SECTION|$)/i);
+  if (introMatch) {
+    return introMatch[1].trim().substring(0, 1000);
   }
   
-  return 'Business description to be added';
+  return 'Business description to be extracted';
 }
 
 // Extract customer overview
 function extractCustomerOverview(raw) {
-  const customerMatch = raw.match(/Customer\s+Overview:([^]*?)(?=#|Core\s+Jobs|$)/i);
+  // Look for CUSTOMERS section
+  const customerMatch = raw.match(/CUSTOMERS[^:]*:([^]*?)(?=\n\d+\.|SECTION|$)/i);
   if (customerMatch) {
     return customerMatch[1].trim().substring(0, 800);
   }
-  return 'Customer overview to be added';
+  
+  // Look for TARGET AUDIENCE section
+  const targetMatch = raw.match(/TARGET AUDIENCE([^]*?)(?=SECTION|$)/i);
+  if (targetMatch) {
+    return targetMatch[1].trim().substring(0, 800);
+  }
+  
+  return 'Customer overview to be extracted';
 }
 
-// Calculate control points
+// Calculate control points (basic scoring based on content)
 function calculateControlPoints(raw) {
   let totalScore = 0;
   
-  // Look for explicit scores in the content
-  const scorePatterns = [
-    /DATA GRAVITY.*?SCORE.*?([0-9.]+)\s*(?:out of|\/)\s*5/i,
-    /WORKFLOW GRAVITY.*?SCORE.*?([0-9.]+)\s*(?:out of|\/)\s*5/i,
-    /ACCOUNT GRAVITY.*?SCORE.*?([0-9.]+)\s*(?:out of|\/)\s*5/i,
-    /NETWORK EFFECTS.*?SCORE.*?([0-9.]+)\s*(?:out of|\/)\s*5/i,
-    /ECOSYSTEM.*?SCORE.*?([0-9.]+)\s*(?:out of|\/)\s*5/i,
-    /PRODUCT EXTENSION.*?SCORE.*?([0-9.]+)\s*(?:out of|\/)\s*5/i
-  ];
+  // Data Gravity indicators
+  if (raw.match(/centralized|unified|single source|data repository/i)) totalScore += 4.5;
   
-  for (const pattern of scorePatterns) {
-    const match = raw.match(pattern);
-    if (match && match[1]) {
-      totalScore += parseFloat(match[1]);
-    }
-  }
+  // Workflow Gravity indicators
+  if (raw.match(/automat|workflow|streamline|process/i)) totalScore += 4.5;
   
-  // If no scores found, estimate based on content
-  if (totalScore === 0) {
-    // Basic heuristic scoring
-    if (raw.match(/data gravity|centralized data|single source/i)) totalScore += 3;
-    if (raw.match(/workflow|automation|process/i)) totalScore += 3;
-    if (raw.match(/network effect|viral|collaboration/i)) totalScore += 2;
-    if (raw.match(/ecosystem|integration|api/i)) totalScore += 2;
-    if (raw.match(/ai|machine learning|predictive/i)) totalScore += 2;
-  }
+  // Account Gravity indicators
+  if (raw.match(/membership|retention|customer satisfaction/i)) totalScore += 4;
   
-  return totalScore;
+  // Network Effects indicators
+  if (raw.match(/network|viral|social|collaboration/i)) totalScore += 3.5;
+  
+  // Ecosystem Control indicators
+  if (raw.match(/ecosystem|integration|platform|api/i)) totalScore += 4;
+  
+  // Product Extension indicators
+  if (raw.match(/ai|machine learning|analytics|predictive/i)) totalScore += 4;
+  
+  return Math.min(totalScore, 30); // Cap at 30
 }
 
 // Get classification based on score
 function getClassification(score) {
   if (score >= 25) return 'SYSTEM OF RECORD';
   if (score >= 20) return 'CORE SAAS';
-  if (score >= 15) return 'POINT SOLUTION';
-  return 'SYSTEM OF PRODUCTIVITY';
+  if (score >= 15) return 'SYSTEM OF WORKFLOW';
+  return 'POINT SOLUTION';
 }
 
 // Create clean Notion page
 async function createCleanNotionPage(data) {
   try {
-    // Format the content for Notion
     const content = formatForNotion(data);
     
-    // Determine where to save the page
     let parent = {};
     
-    // If you have a dedicated database for cleaned companies
     if (process.env.NOTION_CLEANED_DATABASE_ID) {
-      parent = {
-        database_id: process.env.NOTION_CLEANED_DATABASE_ID
-      };
-    }
-    // Or if you have a dedicated parent page for cleaned companies
-    else if (process.env.NOTION_CLEANED_PARENT_PAGE_ID) {
-      parent = {
-        page_id: process.env.NOTION_CLEANED_PARENT_PAGE_ID
-      };
-    }
-    // Fallback to general parent page
-    else if (process.env.NOTION_PARENT_PAGE_ID) {
-      parent = {
-        page_id: process.env.NOTION_PARENT_PAGE_ID
-      };
+      parent = { database_id: process.env.NOTION_CLEANED_DATABASE_ID };
+    } else if (process.env.NOTION_CLEANED_PARENT_PAGE_ID) {
+      parent = { page_id: process.env.NOTION_CLEANED_PARENT_PAGE_ID };
+    } else if (process.env.NOTION_PARENT_PAGE_ID) {
+      parent = { page_id: process.env.NOTION_PARENT_PAGE_ID };
     }
     
-    // Build properties based on whether it's a database or page
     let properties = {
       title: {
-        title: [
-          {
-            text: {
-              content: `${data.companyName} - Cleaned`
-            }
+        title: [{
+          text: {
+            content: `${data.companyName} - Cleaned`
           }
-        ]
+        }]
       }
     };
     
-    // If it's a database, add additional properties
-    if (parent.database_id) {
-      properties = {
-        ...properties,
-        'Company Name': {
-          title: [
-            {
-              text: {
-                content: data.companyName
-              }
-            }
-          ]
-        },
-        'Status': {
-          select: {
-            name: '⭐ Cleaned & Ready'
-          }
-        },
-        'Control Score': {
-          number: data.controlPointsScore
-        },
-        'Classification': {
-          select: {
-            name: data.classification
-          }
-        },
-        'Cleaned Date': {
-          date: {
-            start: new Date().toISOString()
-          }
-        },
-        'Vertical': {
-          rich_text: [
-            {
-              text: {
-                content: data.vertical
-              }
-            }
-          ]
-        }
-      };
-    }
-    
-    // Create the page with icon and cover for visual recognition
     const response = await notion.pages.create({
       parent: parent,
       icon: {
         type: 'emoji',
-        emoji: '✨'  // Clean/ready indicator
+        emoji: '✨'
       },
       cover: {
         type: 'external',
         external: {
-          url: 'https://images.unsplash.com/photo-1557804506-669a67965ba0?w=1200&h=300&fit=crop'  // Professional gradient
+          url: 'https://images.unsplash.com/photo-1557804506-669a67965ba0?w=1200&h=300&fit=crop'
         }
       },
       properties: properties,
       children: content
     });
     
-    console.log(`✅ Created cleaned page for ${data.companyName} with ID: ${response.id}`);
-    
+    console.log(`Created cleaned page for ${data.companyName}`);
     return response;
+    
   } catch (error) {
     throw new Error(`Failed to create Notion page: ${error.message}`);
   }
@@ -611,6 +594,31 @@ function formatForNotion(data) {
         rich_text: [{
           type: 'text',
           text: { content: data.executiveSummary.impact || 'To be extracted' }
+        }]
+      }
+    },
+    {
+      object: 'block',
+      type: 'divider',
+      divider: {}
+    },
+    {
+      object: 'block',
+      type: 'heading_1',
+      heading_1: {
+        rich_text: [{
+          type: 'text',
+          text: { content: 'BUSINESS DESCRIPTION' }
+        }]
+      }
+    },
+    {
+      object: 'block',
+      type: 'paragraph',
+      paragraph: {
+        rich_text: [{
+          type: 'text',
+          text: { content: data.businessDescription }
         }]
       }
     }
