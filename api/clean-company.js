@@ -331,8 +331,8 @@ function calculateControlPoints(raw) {
 // Get classification based on score
 function getClassification(score) {
   if (score >= 25) return 'SYSTEM OF RECORD';
-  if (score >= 20) return 'SYSTEM OF ENGAGEMENT';
-  if (score >= 15) return 'SYSTEM OF WORKFLOW';
+  if (score >= 20) return 'CORE SAAS';
+  if (score >= 15) return 'POINT SOLUTION';
   return 'SYSTEM OF PRODUCTIVITY';
 }
 
