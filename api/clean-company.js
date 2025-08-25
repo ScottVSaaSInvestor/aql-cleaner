@@ -1,5 +1,5 @@
 // api/clean-company.js
-// Simplified version - preserves ALL content without truncation
+// Full content preservation cleaner
 
 import { Client } from '@notionhq/client';
 
@@ -23,13 +23,8 @@ export default async function handler(req, res) {
     const { pageId } = req.body;
     console.log('Cleaning request received for:', pageId);
     
-    // Fetch ALL content from Notion page
     const rawContent = await fetchAllNotionContent(pageId);
-    
-    // Simply reorganize without truncation
     const organizedContent = organizeContent(rawContent);
-    
-    // Create clean page with ALL content
     const newPage = await createFullNotionPage(organizedContent);
     
     return res.status(200).json({ 
@@ -54,7 +49,6 @@ async function fetchAllNotionContent(pageId) {
     let hasMore = true;
     let startCursor = undefined;
     
-    // Fetch ALL blocks (paginated if needed)
     while (hasMore) {
       const response = await notion.blocks.children.list({
         block_id: pageId,
@@ -89,13 +83,11 @@ async function fetchAllNotionContent(pageId) {
 }
 
 function organizeContent(raw) {
-  // Extract basic info
   const companyName = raw.match(/([A-Za-z]+\.app)/i)?.[1] || 'Company';
   const yearFounded = raw.match(/Year Founded:\s*(\d{4})|established in\s+(\d{4})/i)?.[1] || '2023';
   const location = raw.match(/Headquarters Location:\s*([^\n]+)|New York,\s*New York/i)?.[1] || 'New York, New York';
   const funding = raw.match(/Total Funding:\s*([^\n]+)|\$(\d+\s*(?:million|M))/i)?.[1] || 'Not specified';
   
-  // Calculate control score
   let controlScore = 0;
   if (raw.includes('automat') || raw.includes('workflow')) controlScore += 5;
   if (raw.includes('data') && raw.includes('centralized')) controlScore += 5;
@@ -108,10 +100,8 @@ function organizeContent(raw) {
                          controlScore >= 20 ? 'CORE SAAS' :
                          controlScore >= 15 ? 'SYSTEM OF WORKFLOW' : 'POINT SOLUTION';
   
-  // Extract ALL content between section markers WITHOUT truncation
   const sections = {};
   
-  // Find all section content - preserve EVERYTHING
   const sectionMarkers = [
     { key: 'introduction', start: 'SECTION 1: INTRODUCTION', end: 'SECTION 2:' },
     { key: 'marketContext', start: 'SECTION 2: MARKET CONTEXT', end: 'SECTION 3:' },
@@ -140,7 +130,6 @@ function organizeContent(raw) {
         if (endIdx !== -1) contentEnd = endIdx;
       }
       
-      // Get ALL content - no truncation!
       sections[key] = raw.substring(contentStart, contentEnd).trim();
     }
   }
@@ -152,17 +141,15 @@ function organizeContent(raw) {
     funding,
     controlScore,
     classification,
-    raw: raw, // Keep full raw content as backup
+    raw: raw,
     sections
   };
 }
 
 async function createFullNotionPage(data) {
   try {
-    // Create all blocks for the page
     const blocks = [];
     
-    // Title
     blocks.push({
       object: 'block',
       type: 'heading_1',
@@ -175,7 +162,6 @@ async function createFullNotionPage(data) {
       }
     });
     
-    // Table of Contents
     blocks.push({
       object: 'block',
       type: 'toggle',
@@ -203,7 +189,6 @@ V. CONTROL POINTS ANALYSIS` }
     
     blocks.push({ object: 'block', type: 'divider', divider: {} });
     
-    // Company Snapshot
     blocks.push({
       object: 'block',
       type: 'heading_1',
@@ -215,70 +200,4 @@ V. CONTROL POINTS ANALYSIS` }
       }
     });
     
-    const snapshotText = `Company Name: ${data.companyName}
-Year Founded: ${data.yearFounded}
-Location: ${data.location}
-Website: ${data.companyName.toLowerCase()}
-Software Category & Vertical: Sports Facility Management Platform
-FTE Count: Not specified
-Funding History: ${data.funding}`;
-    
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: {
-        rich_text: [{
-          type: 'text',
-          text: { content: snapshotText }
-        }]
-      }
-    });
-    
-    blocks.push({
-      object: 'block',
-      type: 'callout',
-      callout: {
-        rich_text: [{
-          type: 'text',
-          text: { 
-            content: `CONTROL POINTS: FINAL SCORE: ${data.controlScore} / 30 ——> ${data.classification}` 
-          },
-          annotations: { bold: true }
-        }],
-        icon: { emoji: '⭐' }
-      }
-    });
-    
-    blocks.push({ object: 'block', type: 'divider', divider: {} });
-    
-    // Executive Summary (from introduction)
-    if (data.sections.introduction) {
-      blocks.push({
-        object: 'block',
-        type: 'heading_1',
-        heading_1: {
-          rich_text: [{
-            type: 'text',
-            text: { content: 'EXECUTIVE SUMMARY' }
-          }]
-        }
-      });
-      
-      // Add the ENTIRE introduction without truncation
-      addFullContent(blocks, data.sections.introduction);
-    }
-    
-    // The Problem
-    if (data.sections.problem) {
-      blocks.push({
-        object: 'block',
-        type: 'heading_1',
-        heading_1: {
-          rich_text: [{
-            type: 'text',
-            text: { content: 'THE PROBLEM' }
-          }]
-        }
-      });
-      
-      addFullContent(bl
+    const snapshotText
