@@ -217,17 +217,48 @@ function extractSectionContent(text, patterns) {
     // Try to match the pattern
     const match = text.match(pattern);
     if (match) {
-      // Get content after the match until next === or end
+      // Get content after the match
       const startIndex = match.index + match[0].length;
       const remainingText = text.substring(startIndex);
       
-      // Find where this section ends (next === or ***)
-      const endMatch = remainingText.match(/(?:===|\*\*\*)/);
-      const endIndex = endMatch ? endMatch.index : remainingText.length;
+      // Look for the next section marker - be more specific
+      // Stop at the next numbered section, === marker, or control points section
+      const stopPatterns = [
+        /===\s*\d+\./,  // === followed by number
+        /===\s*[IVX]+\./,  // === followed by roman numeral
+        /===\s*[A-Z][A-Z\s]+===/,  // === followed by all caps title
+        /\n\d+\.\s+[A-Z][A-Z\s]+===/,  // Numbered section with ===
+        /\*{3,}/,  // Three or more asterisks
+        /^#{1,3}\s+/m,  // Markdown headers
+        /CONTROL POINTS/i,  // Control points sections
+        /Data Gravity/i,  // Start of control points
+        /Workflow Gravity/i,
+        /Account Gravity/i,
+        /Network Effects/i,
+        /Ecosystem Control/i,
+        /Product Extension/i,
+        /Total Score:/i,
+        /Overall Score:/i,
+        /Classification:/i
+      ];
       
-      const content = remainingText.substring(0, endIndex).trim();
+      let endIndex = remainingText.length;
+      for (const stopPattern of stopPatterns) {
+        const stopMatch = remainingText.match(stopPattern);
+        if (stopMatch && stopMatch.index < endIndex) {
+          endIndex = stopMatch.index;
+        }
+      }
       
-      if (content.length > 10) {
+      // Extract just this section's content
+      let content = remainingText.substring(0, endIndex).trim();
+      
+      // Remove any trailing section headers that got included
+      content = content.replace(/===\s*$/, '');
+      content = content.replace(/\*{3,}\s*$/, '');
+      
+      // Only return if we have meaningful content
+      if (content.length > 20 && !content.match(/^===/) && !content.match(/^\*{3,}/)) {
         return cleanContent(content);
       }
     }
@@ -237,13 +268,53 @@ function extractSectionContent(text, patterns) {
 }
 
 function cleanContent(text) {
-  // Basic cleaning
-  text = text.replace(/Strategic takeaway:[^\n]+/gi, '');
-  text = text.replace(/\*{3,}/g, '');
-  text = text.replace(/\n{3,}/g, '\n\n');
-  text = text.trim();
+  // Remove filler phrases and redundant language
+  const fillerPhrases = [
+    /Strategic takeaway:[^\n]+/gi,
+    /It's worth noting that\s*/gi,
+    /In practical terms,\s*/gi,
+    /Generally speaking,\s*/gi,
+    /As mentioned previously,\s*/gi,
+    /Furthermore,\s*/gi,
+    /Additionally,\s*/gi,
+    /Moreover,\s*/gi,
+    /It should be noted that\s*/gi,
+    /In other words,\s*/gi,
+    /That being said,\s*/gi,
+    /It is important to note that\s*/gi,
+  ];
   
-  return text;
+  for (const filler of fillerPhrases) {
+    text = text.replace(filler, '');
+  }
+  
+  // Clean up formatting artifacts
+  text = text.replace(/\*{3,}/g, '');
+  text = text.replace(/={3,}/g, '');
+  text = text.replace(/\[Paragraph \d+\]:\s*/gi, '');
+  
+  // Format lists properly
+  text = text.replace(/^[-*]\s+/gm, '• ');
+  
+  // Format key-value pairs (e.g., "Company Name: XYZ" becomes bold key)
+  text = text.replace(/^([A-Za-z][A-Za-z\s]+):\s+(.+)$/gm, (match, key, value) => {
+    if (key.length < 50) {  // Reasonable key length
+      return `**${key}:** ${value}`;
+    }
+    return match;
+  });
+  
+  // Format scores (e.g., "8/10" becomes **8/10**)
+  text = text.replace(/(\d+\/\d+)/g, '**$1**');
+  
+  // Clean up excessive whitespace
+  text = text.replace(/\n{3,}/g, '\n\n');
+  text = text.replace(/[ \t]+/g, ' ');
+  
+  // Ensure sentences are properly capitalized
+  text = text.replace(/\.\s+([a-z])/g, (match, letter) => `. ${letter.toUpperCase()}`);
+  
+  return text.trim();
 }
 
 function splitIntoChunks(text, maxLength = 1900) {
@@ -376,17 +447,9 @@ async function createCleanedPage(companyName, structure) {
       }
     });
     
-    // Add content
-    const contentChunks = splitIntoChunks(section.content);
-    for (const chunk of contentChunks) {
-      blocks.push({
-        object: 'block',
-        type: 'paragraph',
-        paragraph: {
-          rich_text: [{ type: 'text', text: { content: chunk } }]
-        }
-      });
-    }
+    // Process content with proper formatting
+    const contentBlocks = processFormattedContent(section.content);
+    blocks.push(...contentBlocks);
     
     blocks.push({ object: 'block', type: 'divider', divider: {} });
   }
@@ -409,48 +472,9 @@ async function createCleanedPage(companyName, structure) {
       }
     });
     
-    // Check if this is a score section
-    if (section.content.includes('/10') || section.content.includes('/30')) {
-      // Use callout for scores
-      const scoreMatches = section.content.match(/(.+?):\s*(\d+\/\d+)/g) || [];
-      for (const score of scoreMatches) {
-        blocks.push({
-          object: 'block',
-          type: 'callout',
-          callout: {
-            rich_text: [{ type: 'text', text: { content: score } }],
-            icon: { emoji: '📊' }
-          }
-        });
-      }
-      
-      // Add remaining content
-      const nonScoreContent = section.content.replace(/(.+?):\s*(\d+\/\d+)/g, '').trim();
-      if (nonScoreContent) {
-        const chunks = splitIntoChunks(nonScoreContent);
-        for (const chunk of chunks) {
-          blocks.push({
-            object: 'block',
-            type: 'paragraph',
-            paragraph: {
-              rich_text: [{ type: 'text', text: { content: chunk } }]
-            }
-          });
-        }
-      }
-    } else {
-      // Regular content
-      const contentChunks = splitIntoChunks(section.content);
-      for (const chunk of contentChunks) {
-        blocks.push({
-          object: 'block',
-          type: 'paragraph',
-          paragraph: {
-            rich_text: [{ type: 'text', text: { content: chunk } }]
-          }
-        });
-      }
-    }
+    // Process content with special handling for scores
+    const contentBlocks = processFormattedContent(section.content, section.title.includes('Score') || section.title.includes('Control Points'));
+    blocks.push(...contentBlocks);
     
     blocks.push({ object: 'block', type: 'divider', divider: {} });
   }
@@ -483,4 +507,191 @@ async function createCleanedPage(companyName, structure) {
   }
   
   return response.id;
+}
+
+function processFormattedContent(content, isScoreSection = false) {
+  const blocks = [];
+  
+  if (!content || content === 'Content to be added') {
+    blocks.push({
+      object: 'block',
+      type: 'callout',
+      callout: {
+        rich_text: [{ type: 'text', text: { content: 'Content to be added' } }],
+        icon: { emoji: '📝' },
+        color: 'gray_background'
+      }
+    });
+    return blocks;
+  }
+  
+  const lines = content.split('\n');
+  let currentParagraph = [];
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    
+    if (!trimmed) {
+      // Empty line - flush current paragraph
+      if (currentParagraph.length > 0) {
+        const paragraphText = currentParagraph.join(' ');
+        const chunks = splitIntoChunks(paragraphText);
+        for (const chunk of chunks) {
+          blocks.push({
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: formatRichText(chunk)
+            }
+          });
+        }
+        currentParagraph = [];
+      }
+      continue;
+    }
+    
+    // Handle bullets
+    if (trimmed.startsWith('•')) {
+      // Flush current paragraph first
+      if (currentParagraph.length > 0) {
+        const paragraphText = currentParagraph.join(' ');
+        const chunks = splitIntoChunks(paragraphText);
+        for (const chunk of chunks) {
+          blocks.push({
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: formatRichText(chunk)
+            }
+          });
+        }
+        currentParagraph = [];
+      }
+      
+      const bulletText = trimmed.substring(1).trim();
+      const chunks = splitIntoChunks(bulletText);
+      for (const chunk of chunks) {
+        blocks.push({
+          object: 'block',
+          type: 'bulleted_list_item',
+          bulleted_list_item: {
+            rich_text: formatRichText(chunk)
+          }
+        });
+      }
+    }
+    // Handle numbered items
+    else if (trimmed.match(/^\d+\./)) {
+      // Flush current paragraph first
+      if (currentParagraph.length > 0) {
+        const paragraphText = currentParagraph.join(' ');
+        const chunks = splitIntoChunks(paragraphText);
+        for (const chunk of chunks) {
+          blocks.push({
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: formatRichText(chunk)
+            }
+          });
+        }
+        currentParagraph = [];
+      }
+      
+      const numberedText = trimmed.replace(/^\d+\.\s*/, '');
+      const chunks = splitIntoChunks(numberedText);
+      for (const chunk of chunks) {
+        blocks.push({
+          object: 'block',
+          type: 'numbered_list_item',
+          numbered_list_item: {
+            rich_text: formatRichText(chunk)
+          }
+        });
+      }
+    }
+    // Handle scores with callout
+    else if ((trimmed.includes('/10') || trimmed.includes('/30')) && isScoreSection) {
+      // Flush current paragraph first
+      if (currentParagraph.length > 0) {
+        const paragraphText = currentParagraph.join(' ');
+        const chunks = splitIntoChunks(paragraphText);
+        for (const chunk of chunks) {
+          blocks.push({
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: formatRichText(chunk)
+            }
+          });
+        }
+        currentParagraph = [];
+      }
+      
+      blocks.push({
+        object: 'block',
+        type: 'callout',
+        callout: {
+          rich_text: formatRichText(trimmed),
+          icon: { emoji: '📊' },
+          color: 'blue_background'
+        }
+      });
+    }
+    // Regular paragraph line
+    else {
+      currentParagraph.push(trimmed);
+    }
+  }
+  
+  // Flush any remaining paragraph
+  if (currentParagraph.length > 0) {
+    const paragraphText = currentParagraph.join(' ');
+    const chunks = splitIntoChunks(paragraphText);
+    for (const chunk of chunks) {
+      blocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: formatRichText(chunk)
+        }
+      });
+    }
+  }
+  
+  return blocks;
+}
+
+function formatRichText(text) {
+  // Handle bold text marked with **
+  const parts = text.split(/(\*\*[^*]+\*\*)/);
+  const richText = [];
+  
+  for (const part of parts) {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      // This is bold text
+      richText.push({
+        type: 'text',
+        text: { content: part.slice(2, -2) },
+        annotations: { bold: true }
+      });
+    } else if (part) {
+      // Regular text
+      richText.push({
+        type: 'text',
+        text: { content: part }
+      });
+    }
+  }
+  
+  // If no formatting was found, return simple text
+  if (richText.length === 0) {
+    return [{ type: 'text', text: { content: text } }];
+  }
+  
+  // Ensure text doesn't exceed 2000 chars per block
+  return richText.map(item => ({
+    ...item,
+    text: { content: item.text.content.substring(0, 1900) }
+  }));
 }
