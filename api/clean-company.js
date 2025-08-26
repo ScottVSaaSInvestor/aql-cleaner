@@ -279,4 +279,208 @@ function splitIntoChunks(text, maxLength = 1900) {
       }
     }
     
-    chunks.push(remaining.substring(0, splitPoint)
+    chunks.push(remaining.substring(0, splitPoint).trim());
+    remaining = remaining.substring(splitPoint).trim();
+  }
+  
+  return chunks;
+}
+
+async function createCleanedPage(companyName, structure) {
+  const blocks = [];
+  
+  // Title page
+  blocks.push({
+    object: 'block',
+    type: 'heading_1',
+    heading_1: {
+      rich_text: [{
+        type: 'text',
+        text: { content: `${companyName} Overview` }
+      }]
+    }
+  });
+  
+  // Overall Table of Contents
+  blocks.push({
+    object: 'block',
+    type: 'heading_2',
+    heading_2: {
+      rich_text: [{ type: 'text', text: { content: 'Table of Contents' } }]
+    }
+  });
+  
+  // Add TOC for Part 1
+  blocks.push({
+    object: 'block',
+    type: 'paragraph',
+    paragraph: {
+      rich_text: [{ 
+        type: 'text', 
+        text: { content: 'Part 1: Company Overview' },
+        annotations: { bold: true }
+      }]
+    }
+  });
+  
+  for (const section of structure['Part 1: Company Overview']) {
+    blocks.push({
+      object: 'block',
+      type: 'numbered_list_item',
+      numbered_list_item: {
+        rich_text: [{ type: 'text', text: { content: section.title.substring(3) } }]  // Remove number prefix
+      }
+    });
+  }
+  
+  // Add TOC for Part 2
+  blocks.push({
+    object: 'block',
+    type: 'paragraph',
+    paragraph: {
+      rich_text: [{ 
+        type: 'text', 
+        text: { content: 'Part 2: Control Points Analysis' },
+        annotations: { bold: true }
+      }]
+    }
+  });
+  
+  for (const section of structure['Part 2: Control Points Analysis']) {
+    blocks.push({
+      object: 'block',
+      type: 'numbered_list_item',
+      numbered_list_item: {
+        rich_text: [{ type: 'text', text: { content: section.title.substring(3) } }]  // Remove number prefix
+      }
+    });
+  }
+  
+  blocks.push({ object: 'block', type: 'divider', divider: {} });
+  
+  // Part 1 Content
+  blocks.push({
+    object: 'block',
+    type: 'heading_1',
+    heading_1: {
+      rich_text: [{ type: 'text', text: { content: 'Part 1: Company Overview' } }]
+    }
+  });
+  
+  for (const section of structure['Part 1: Company Overview']) {
+    blocks.push({
+      object: 'block',
+      type: 'heading_2',
+      heading_2: {
+        rich_text: [{ type: 'text', text: { content: section.title } }]
+      }
+    });
+    
+    // Add content
+    const contentChunks = splitIntoChunks(section.content);
+    for (const chunk of contentChunks) {
+      blocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: [{ type: 'text', text: { content: chunk } }]
+        }
+      });
+    }
+    
+    blocks.push({ object: 'block', type: 'divider', divider: {} });
+  }
+  
+  // Part 2 Content
+  blocks.push({
+    object: 'block',
+    type: 'heading_1',
+    heading_1: {
+      rich_text: [{ type: 'text', text: { content: 'Part 2: Control Points Analysis' } }]
+    }
+  });
+  
+  for (const section of structure['Part 2: Control Points Analysis']) {
+    blocks.push({
+      object: 'block',
+      type: 'heading_2',
+      heading_2: {
+        rich_text: [{ type: 'text', text: { content: section.title } }]
+      }
+    });
+    
+    // Check if this is a score section
+    if (section.content.includes('/10') || section.content.includes('/30')) {
+      // Use callout for scores
+      const scoreMatches = section.content.match(/(.+?):\s*(\d+\/\d+)/g) || [];
+      for (const score of scoreMatches) {
+        blocks.push({
+          object: 'block',
+          type: 'callout',
+          callout: {
+            rich_text: [{ type: 'text', text: { content: score } }],
+            icon: { emoji: '📊' }
+          }
+        });
+      }
+      
+      // Add remaining content
+      const nonScoreContent = section.content.replace(/(.+?):\s*(\d+\/\d+)/g, '').trim();
+      if (nonScoreContent) {
+        const chunks = splitIntoChunks(nonScoreContent);
+        for (const chunk of chunks) {
+          blocks.push({
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [{ type: 'text', text: { content: chunk } }]
+            }
+          });
+        }
+      }
+    } else {
+      // Regular content
+      const contentChunks = splitIntoChunks(section.content);
+      for (const chunk of contentChunks) {
+        blocks.push({
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [{ type: 'text', text: { content: chunk } }]
+          }
+        });
+      }
+    }
+    
+    blocks.push({ object: 'block', type: 'divider', divider: {} });
+  }
+  
+  // Create the page
+  const pageData = {
+    parent: { page_id: process.env.NOTION_CLEANED_PARENT_PAGE_ID },
+    properties: {
+      title: {
+        title: [{
+          text: { content: `${companyName} - Cleaned for Presentation` }
+        }]
+      }
+    },
+    children: blocks.slice(0, 100)
+  };
+  
+  const response = await notion.pages.create(pageData);
+  
+  // Add remaining blocks if needed
+  if (blocks.length > 100) {
+    const remaining = blocks.slice(100);
+    for (let i = 0; i < remaining.length; i += 100) {
+      const batch = remaining.slice(i, Math.min(i + 100, remaining.length));
+      await notion.blocks.children.append({
+        block_id: response.id,
+        children: batch
+      });
+    }
+  }
+  
+  return response.id;
+}
