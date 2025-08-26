@@ -33,7 +33,7 @@ export default async function handler(req, res) {
   try {
     console.log(`Processing page: ${pageId}`);
     
-    // Fetch the page blocks (not the page itself)
+    // Fetch the page blocks
     const response = await notion.blocks.children.list({
       block_id: pageId,
       page_size: 100,
@@ -61,14 +61,16 @@ export default async function handler(req, res) {
 
     console.log('Total blocks fetched:', allBlocks.length);
 
-    // Extract text from blocks
+    // Extract text from blocks - preserve the exact structure
+    const contentLines = [];
     for (const block of allBlocks) {
       const text = extractTextFromBlock(block);
       if (text) {
-        rawContent += text + '\n';
+        contentLines.push(text);
       }
     }
 
+    rawContent = contentLines.join('\n');
     console.log('Content length:', rawContent.length);
     console.log('First 500 chars:', rawContent.substring(0, 500));
 
@@ -77,25 +79,22 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'No content found in source page' });
     }
 
-    // Clean and structure the content
-    const cleanedData = cleanRawData(rawContent);
-    
-    if (!cleanedData.company) {
-      console.error('Could not extract company name');
-      cleanedData.company = 'Unknown Company';
-    }
+    // Extract company name
+    const companyName = extractCompanyName(rawContent);
+    console.log('Company:', companyName);
 
-    console.log('Company:', cleanedData.company);
-    console.log('Sections found:', Object.keys(cleanedData).length);
+    // Create sections based on === markers
+    const sections = parseClayContent(rawContent);
+    console.log('Sections found:', sections.length);
 
     // Create the cleaned page
-    const newPageId = await createCleanedPage(cleanedData);
+    const newPageId = await createCleanedPage(companyName, sections);
     
     console.log('Success! New page:', newPageId);
     return res.status(200).json({ 
       success: true, 
       pageId: newPageId,
-      company: cleanedData.company 
+      company: companyName 
     });
 
   } catch (error) {
@@ -119,11 +118,11 @@ function extractTextFromBlock(block) {
   if (block.type === 'paragraph' && block.paragraph?.rich_text) {
     text = block.paragraph.rich_text.map(t => t.plain_text).join('');
   } else if (block.type === 'heading_1' && block.heading_1?.rich_text) {
-    text = block.heading_1.rich_text.map(t => t.plain_text).join('');
+    text = '# ' + block.heading_1.rich_text.map(t => t.plain_text).join('');
   } else if (block.type === 'heading_2' && block.heading_2?.rich_text) {
-    text = block.heading_2.rich_text.map(t => t.plain_text).join('');
+    text = '## ' + block.heading_2.rich_text.map(t => t.plain_text).join('');
   } else if (block.type === 'heading_3' && block.heading_3?.rich_text) {
-    text = block.heading_3.rich_text.map(t => t.plain_text).join('');
+    text = '### ' + block.heading_3.rich_text.map(t => t.plain_text).join('');
   } else if (block.type === 'bulleted_list_item' && block.bulleted_list_item?.rich_text) {
     text = '• ' + block.bulleted_list_item.rich_text.map(t => t.plain_text).join('');
   } else if (block.type === 'numbered_list_item' && block.numbered_list_item?.rich_text) {
@@ -131,343 +130,162 @@ function extractTextFromBlock(block) {
   } else if (block.type === 'code' && block.code?.rich_text) {
     text = block.code.rich_text.map(t => t.plain_text).join('');
   } else if (block.type === 'quote' && block.quote?.rich_text) {
-    text = block.quote.rich_text.map(t => t.plain_text).join('');
+    text = '"' + block.quote.rich_text.map(t => t.plain_text).join('') + '"';
   }
   
   return text;
 }
 
-function cleanRawData(content) {
-  const cleaned = {
-    company: extractCompanyName(content),
-    tableOfContents: [],
-    sections: []
-  };
-
-  // Remove excess wordiness while preserving insights
-  content = reduceWordiness(content);
-
-  // Split content by main section markers (=== or ***)
-  const sectionParts = content.split(/(?:===+|\*\*\*+)/);
-  
-  for (let i = 0; i < sectionParts.length; i++) {
-    const part = sectionParts[i].trim();
-    if (!part) continue;
-
-    // Check if this is a section header
-    const headerMatch = part.match(/^[\d\w\s\-\.]+(?:SNAPSHOT|SUMMARY|CAPABILITIES|PROFILE|PROPOSITION|TECHNOLOGY|DIFFERENTIATION|CONTROL POINTS|INTEGRATION|ARCHITECTURE|STORIES|JOBS|FRAMEWORK)/i);
-    
-    if (headerMatch || part.length > 100) {
-      // This is likely a section with content
-      const sectionTitle = headerMatch ? headerMatch[0].trim() : `Section ${cleaned.sections.length + 1}`;
-      
-      // Add to table of contents
-      cleaned.tableOfContents.push(sectionTitle);
-      
-      // Process the section content
-      const sectionContent = part.replace(headerMatch ? headerMatch[0] : '', '').trim();
-      
-      cleaned.sections.push({
-        title: sectionTitle,
-        content: processSectionContent(sectionContent, sectionTitle)
-      });
-    }
-  }
-
-  // If no sections were found, treat the entire content as one section
-  if (cleaned.sections.length === 0 && content.trim()) {
-    cleaned.sections.push({
-      title: 'Content',
-      content: processSectionContent(content, 'Content')
-    });
-  }
-
-  return cleaned;
-}
-
 function extractCompanyName(content) {
-  // Try multiple patterns to find company name
+  // Try to find company name
   const patterns = [
     /Company Name:\s*([^\n\-]+)/i,
+    /^#\s+CLAY_RAW_(.+?)(?:\s|$)/m,
     /^#\s+(.+?)(?:\s+-|$)/m,
     /^(.+?)\.(?:com|io|ai|app)\b/i,
-    /^(.+?)\s+====/m
   ];
 
   for (const pattern of patterns) {
     const match = content.match(pattern);
     if (match) {
-      return match[1].trim();
+      return match[1].trim().replace(/_/g, ' ');
     }
   }
 
-  return null;
+  return 'Company';
 }
 
-function reduceWordiness(text) {
-  // Remove repetitive strategic takeaways
+function parseClayContent(content) {
+  const sections = [];
+  
+  // Split by === markers - these denote main sections in Clay
+  const parts = content.split(/===+/);
+  
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i].trim();
+    if (!part) continue;
+    
+    // First line is usually the section title
+    const lines = part.split('\n');
+    const firstLine = lines[0].trim();
+    
+    // Check if this looks like a section header
+    if (firstLine && (
+      firstLine.match(/^\d+\.?\s+/) || // Numbered section
+      firstLine.match(/^[IVX]+\.?\s+/) || // Roman numerals
+      firstLine.match(/SNAPSHOT|SUMMARY|CAPABILITIES|PROFILE|PROPOSITION|TECHNOLOGY|CONTROL|INTEGRATION|STORIES|JOBS|FRAMEWORK/i)
+    )) {
+      const sectionTitle = firstLine.replace(/^[\d\.IVX]+\s+/, '').trim();
+      const sectionContent = lines.slice(1).join('\n').trim();
+      
+      if (sectionTitle) {
+        sections.push({
+          title: sectionTitle,
+          content: cleanContent(sectionContent)
+        });
+      }
+    } else if (part.length > 50) {
+      // If no clear title, use generic section name
+      sections.push({
+        title: `Section ${sections.length + 1}`,
+        content: cleanContent(part)
+      });
+    }
+  }
+  
+  // If no sections found with ===, try splitting by *** markers
+  if (sections.length === 0) {
+    const altParts = content.split(/\*\*\*+/);
+    for (const part of altParts) {
+      if (part.trim().length > 50) {
+        sections.push({
+          title: `Section ${sections.length + 1}`,
+          content: cleanContent(part.trim())
+        });
+      }
+    }
+  }
+  
+  // If still no sections, treat entire content as one section
+  if (sections.length === 0) {
+    sections.push({
+      title: 'Content',
+      content: cleanContent(content)
+    });
+  }
+  
+  return sections;
+}
+
+function cleanContent(text) {
+  // Light cleaning while preserving all content
+  
+  // Remove repetitive phrases
   text = text.replace(/Strategic takeaway:[^.]+\./gi, '');
   
-  // Remove common filler phrases but preserve the content after them
-  const fillers = [
-    /It's worth noting that\s*/gi,
-    /It should be noted that\s*/gi,
-    /In practical terms,\s*/gi,
-    /Generally speaking,\s*/gi,
-    /As mentioned previously,\s*/gi,
-    /Furthermore,\s*/gi,
-    /Additionally,\s*/gi,
-    /Moreover,\s*/gi,
-    /In other words,\s*/gi,
-    /That being said,\s*/gi,
-    /It is important to note that\s*/gi,
-    /It's important to mention that\s*/gi
-  ];
+  // Remove filler phrases
+  text = text.replace(/It's worth noting that\s*/gi, '');
+  text = text.replace(/In practical terms,\s*/gi, '');
+  text = text.replace(/Generally speaking,\s*/gi, '');
+  text = text.replace(/As mentioned previously,\s*/gi, '');
   
-  fillers.forEach(filler => {
-    text = text.replace(filler, '');
-  });
-  
-  // Clean up excessive whitespace
+  // Clean up whitespace
   text = text.replace(/\n\s*\n\s*\n/g, '\n\n');
   text = text.replace(/[ \t]+/g, ' ');
   
   return text.trim();
 }
 
-function processSectionContent(content, sectionTitle) {
-  const processedContent = [];
-  
-  // Special handling for different section types
-  if (sectionTitle.includes('SNAPSHOT')) {
-    processedContent.push(...processSnapshot(content));
-  } else if (sectionTitle.includes('EXECUTIVE SUMMARY')) {
-    processedContent.push(...processExecutiveSummary(content));
-  } else if (sectionTitle.includes('CONTROL POINTS')) {
-    processedContent.push(...processControlPoints(content));
-  } else if (sectionTitle.includes('STORIES')) {
-    processedContent.push(...processStories(content));
-  } else if (sectionTitle.includes('JOBS')) {
-    processedContent.push(...processJobs(content));
-  } else {
-    // Default processing for other sections
-    processedContent.push(...processGenericSection(content));
-  }
-  
-  return processedContent;
-}
-
-function processSnapshot(content) {
-  const items = [];
-  const lines = content.split('\n').filter(line => line.trim());
-  
-  for (const line of lines) {
-    if (line.includes(':')) {
-      const [label, value] = line.split(':').map(s => s.trim());
-      items.push({
-        type: 'key_value',
-        label: label.replace(/^-\s*/, ''),
-        value: value || ''
-      });
-    } else if (line.trim()) {
-      items.push({
-        type: 'text',
-        content: line.trim()
-      });
-    }
-  }
-  
-  return items;
-}
-
-function processExecutiveSummary(content) {
-  const items = [];
-  
-  // Extract paragraphs marked as [Paragraph X]
-  const paragraphs = content.split(/\[Paragraph \d+\]/i).filter(p => p.trim());
-  
-  for (const paragraph of paragraphs) {
-    const cleanParagraph = paragraph.trim().replace(/^\s*[:：]\s*/, '');
-    if (cleanParagraph) {
-      items.push({
-        type: 'paragraph',
-        content: cleanParagraph
-      });
-    }
-  }
-  
-  // If no paragraph markers, treat as regular content
-  if (items.length === 0 && content.trim()) {
-    items.push({
-      type: 'paragraph',
-      content: content.trim()
-    });
-  }
-  
-  return items;
-}
-
-function processControlPoints(content) {
-  const items = [];
-  const lines = content.split('\n');
-  
-  for (const line of lines) {
-    const scoreLine = line.match(/(.+?):\s*(\d+\/\d+)/);
-    if (scoreLine) {
-      items.push({
-        type: 'score',
-        label: scoreLine[1].trim(),
-        value: scoreLine[2]
-      });
-    } else if (line.includes('Total Score:') || line.includes('Overall Score:')) {
-      items.push({
-        type: 'total_score',
-        content: line.trim()
-      });
-    } else if (line.trim()) {
-      items.push({
-        type: 'text',
-        content: line.trim()
-      });
-    }
-  }
-  
-  return items;
-}
-
-function processStories(content) {
-  const items = [];
-  const stories = content.split(/(?:Story \d+:|Customer Story:|Success Story:)/i);
-  
-  for (const story of stories) {
-    if (story.trim()) {
-      items.push({
-        type: 'story',
-        content: story.trim()
-      });
-    }
-  }
-  
-  return items;
-}
-
-function processJobs(content) {
-  const items = [];
-  const jobs = content.split(/(?:Job \d+:|When I|I want to|So that)/i);
-  
-  for (const job of jobs) {
-    if (job.trim() && job.length > 10) {
-      items.push({
-        type: 'job',
-        content: job.trim()
-      });
-    }
-  }
-  
-  return items;
-}
-
-function processGenericSection(content) {
-  const items = [];
-  const lines = content.split('\n');
-  let currentList = [];
-  let currentParagraph = [];
-  
-  for (const line of lines) {
-    const trimmedLine = line.trim();
-    
-    if (!trimmedLine) {
-      // Empty line - flush current paragraph
-      if (currentParagraph.length > 0) {
-        items.push({
-          type: 'paragraph',
-          content: currentParagraph.join(' ')
-        });
-        currentParagraph = [];
-      }
-    } else if (trimmedLine.match(/^[-•*]\s+/)) {
-      // Bullet point
-      if (currentParagraph.length > 0) {
-        items.push({
-          type: 'paragraph',
-          content: currentParagraph.join(' ')
-        });
-        currentParagraph = [];
-      }
-      currentList.push(trimmedLine.replace(/^[-•*]\s+/, ''));
-    } else if (trimmedLine.match(/^\d+\.\s+/)) {
-      // Numbered list
-      if (currentParagraph.length > 0) {
-        items.push({
-          type: 'paragraph',
-          content: currentParagraph.join(' ')
-        });
-        currentParagraph = [];
-      }
-      items.push({
-        type: 'numbered',
-        content: trimmedLine.replace(/^\d+\.\s+/, '')
-      });
-    } else {
-      // Regular text
-      if (currentList.length > 0) {
-        items.push({
-          type: 'bullet_list',
-          items: currentList
-        });
-        currentList = [];
-      }
-      currentParagraph.push(trimmedLine);
-    }
-  }
-  
-  // Flush remaining content
-  if (currentParagraph.length > 0) {
-    items.push({
-      type: 'paragraph',
-      content: currentParagraph.join(' ')
-    });
-  }
-  if (currentList.length > 0) {
-    items.push({
-      type: 'bullet_list',
-      items: currentList
-    });
-  }
-  
-  return items;
-}
-
-function splitIntoChunks(text, maxLength = 1900) {
+function splitText(text, maxLength = 1900) {
   if (text.length <= maxLength) return [text];
   
   const chunks = [];
+  
+  // First try to split by paragraphs (double newlines)
+  const paragraphs = text.split(/\n\n+/);
   let currentChunk = '';
   
-  // Try to split at sentence boundaries
-  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-  
-  for (const sentence of sentences) {
-    if ((currentChunk + sentence).length <= maxLength) {
-      currentChunk += sentence;
-    } else {
-      if (currentChunk) chunks.push(currentChunk.trim());
-      
-      // If single sentence is too long, split it
-      if (sentence.length > maxLength) {
-        const words = sentence.split(' ');
+  for (const paragraph of paragraphs) {
+    if (paragraph.length > maxLength) {
+      // If single paragraph is too long, split by sentences
+      if (currentChunk) {
+        chunks.push(currentChunk.trim());
         currentChunk = '';
-        for (const word of words) {
-          if ((currentChunk + ' ' + word).length <= maxLength) {
-            currentChunk += (currentChunk ? ' ' : '') + word;
-          } else {
-            if (currentChunk) chunks.push(currentChunk.trim());
-            currentChunk = word;
-          }
-        }
-      } else {
-        currentChunk = sentence;
       }
+      
+      const sentences = paragraph.match(/[^.!?]+[.!?]+/g) || [paragraph];
+      for (const sentence of sentences) {
+        if (sentence.length > maxLength) {
+          // If single sentence is too long, force split
+          if (currentChunk) {
+            chunks.push(currentChunk.trim());
+            currentChunk = '';
+          }
+          
+          // Split long sentence by words
+          const words = sentence.split(/\s+/);
+          let tempChunk = '';
+          for (const word of words) {
+            if ((tempChunk + ' ' + word).length > maxLength) {
+              if (tempChunk) chunks.push(tempChunk.trim());
+              tempChunk = word;
+            } else {
+              tempChunk += (tempChunk ? ' ' : '') + word;
+            }
+          }
+          if (tempChunk) chunks.push(tempChunk.trim());
+        } else if ((currentChunk + ' ' + sentence).length > maxLength) {
+          if (currentChunk) chunks.push(currentChunk.trim());
+          currentChunk = sentence;
+        } else {
+          currentChunk += (currentChunk ? ' ' : '') + sentence;
+        }
+      }
+    } else if ((currentChunk + '\n\n' + paragraph).length > maxLength) {
+      if (currentChunk) chunks.push(currentChunk.trim());
+      currentChunk = paragraph;
+    } else {
+      currentChunk += (currentChunk ? '\n\n' : '') + paragraph;
     }
   }
   
@@ -476,7 +294,7 @@ function splitIntoChunks(text, maxLength = 1900) {
   return chunks;
 }
 
-async function createCleanedPage(data) {
+async function createCleanedPage(companyName, sections) {
   const blocks = [];
   
   // Title
@@ -486,13 +304,13 @@ async function createCleanedPage(data) {
     heading_1: {
       rich_text: [{
         type: 'text',
-        text: { content: `${data.company || 'Company'} - Cleaned for Presentation` }
+        text: { content: `${companyName} - Cleaned for Presentation` }
       }]
     }
   });
   
   // Table of Contents
-  if (data.tableOfContents && data.tableOfContents.length > 0) {
+  if (sections.length > 1) {
     blocks.push({
       object: 'block',
       type: 'heading_2',
@@ -501,26 +319,27 @@ async function createCleanedPage(data) {
       }
     });
     
-    for (let i = 0; i < data.tableOfContents.length; i++) {
-      const tocItem = `${i + 1}. ${data.tableOfContents[i]}`;
-      if (tocItem.length <= 2000) {
+    // Add TOC items
+    for (let i = 0; i < sections.length; i++) {
+      const tocText = `${i + 1}. ${sections[i].title}`;
+      if (tocText.length <= 2000) {
         blocks.push({
           object: 'block',
           type: 'numbered_list_item',
           numbered_list_item: {
-            rich_text: [{ type: 'text', text: { content: tocItem } }]
+            rich_text: [{ type: 'text', text: { content: tocText } }]
           }
         });
       }
     }
+    
+    // Divider after TOC
+    blocks.push({ object: 'block', type: 'divider', divider: {} });
   }
   
-  // Divider
-  blocks.push({ object: 'block', type: 'divider', divider: {} });
-  
-  // Sections
-  for (const section of data.sections) {
-    // Section title
+  // Add each section
+  for (const section of sections) {
+    // Section heading
     blocks.push({
       object: 'block',
       type: 'heading_2',
@@ -529,123 +348,119 @@ async function createCleanedPage(data) {
       }
     });
     
-    // Section content
-    for (const item of section.content) {
-      if (item.type === 'key_value') {
-        const text = `${item.label}: ${item.value}`;
-        const chunks = splitIntoChunks(text);
-        for (const chunk of chunks) {
-          blocks.push({
-            object: 'block',
-            type: 'paragraph',
-            paragraph: {
-              rich_text: [
-                { type: 'text', text: { content: item.label + ': ' }, annotations: { bold: true } },
-                { type: 'text', text: { content: item.value } }
-              ].filter(rt => rt.text.content.length <= 2000)
-            }
-          });
-        }
-      } else if (item.type === 'paragraph' || item.type === 'text') {
-        const chunks = splitIntoChunks(item.content);
-        for (const chunk of chunks) {
-          blocks.push({
-            object: 'block',
-            type: 'paragraph',
-            paragraph: {
-              rich_text: [{ type: 'text', text: { content: chunk } }]
-            }
-          });
-        }
-      } else if (item.type === 'bullet_list') {
-        for (const bullet of item.items) {
-          const chunks = splitIntoChunks(bullet);
-          for (const chunk of chunks) {
-            blocks.push({
+    // Section content - split if needed
+    const contentChunks = splitText(section.content);
+    
+    for (const chunk of contentChunks) {
+      // Detect what type of content this is
+      const lines = chunk.split('\n');
+      
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) continue;
+        
+        let blockToAdd = null;
+        
+        // Check if it's a bullet point
+        if (trimmedLine.startsWith('• ') || trimmedLine.startsWith('- ') || trimmedLine.startsWith('* ')) {
+          const bulletContent = trimmedLine.replace(/^[•\-*]\s+/, '');
+          if (bulletContent.length <= 2000) {
+            blockToAdd = {
               object: 'block',
               type: 'bulleted_list_item',
               bulleted_list_item: {
-                rich_text: [{ type: 'text', text: { content: chunk } }]
+                rich_text: [{ type: 'text', text: { content: bulletContent } }]
               }
-            });
+            };
           }
         }
-      } else if (item.type === 'numbered') {
-        const chunks = splitIntoChunks(item.content);
-        for (const chunk of chunks) {
-          blocks.push({
-            object: 'block',
-            type: 'numbered_list_item',
-            numbered_list_item: {
-              rich_text: [{ type: 'text', text: { content: chunk } }]
-            }
-          });
+        // Check if it's a key-value pair
+        else if (trimmedLine.includes(':') && trimmedLine.indexOf(':') < 50) {
+          const colonIndex = trimmedLine.indexOf(':');
+          const key = trimmedLine.substring(0, colonIndex).trim();
+          const value = trimmedLine.substring(colonIndex + 1).trim();
+          
+          if (key.length + value.length <= 1900) {
+            blockToAdd = {
+              object: 'block',
+              type: 'paragraph',
+              paragraph: {
+                rich_text: [
+                  { type: 'text', text: { content: key + ': ' }, annotations: { bold: true } },
+                  { type: 'text', text: { content: value } }
+                ]
+              }
+            };
+          } else {
+            // If too long, just add as regular paragraph
+            blockToAdd = {
+              object: 'block',
+              type: 'paragraph',
+              paragraph: {
+                rich_text: [{ type: 'text', text: { content: trimmedLine.substring(0, 1900) } }]
+              }
+            };
+          }
         }
-      } else if (item.type === 'score') {
-        blocks.push({
-          object: 'block',
-          type: 'callout',
-          callout: {
-            rich_text: [
-              { type: 'text', text: { content: `${item.label}: ` }, annotations: { bold: true } },
-              { type: 'text', text: { content: item.value } }
-            ],
-            icon: { emoji: '📊' }
-          }
-        });
-      } else if (item.type === 'total_score') {
-        blocks.push({
-          object: 'block',
-          type: 'callout',
-          callout: {
-            rich_text: [{ type: 'text', text: { content: item.content }, annotations: { bold: true } }],
-            icon: { emoji: '🎯' },
-            color: 'green_background'
-          }
-        });
-      } else if (item.type === 'story' || item.type === 'job') {
-        const chunks = splitIntoChunks(item.content);
-        for (const chunk of chunks) {
-          blocks.push({
+        // Check if it's a score (e.g., "Something: 8/10")
+        else if (trimmedLine.match(/:\s*\d+\/\d+/)) {
+          blockToAdd = {
             object: 'block',
-            type: 'quote',
-            quote: {
-              rich_text: [{ type: 'text', text: { content: chunk } }]
+            type: 'callout',
+            callout: {
+              rich_text: [{ type: 'text', text: { content: trimmedLine } }],
+              icon: { emoji: '📊' }
             }
-          });
+          };
+        }
+        // Default to paragraph
+        else if (trimmedLine.length <= 2000) {
+          blockToAdd = {
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [{ type: 'text', text: { content: trimmedLine } }]
+            }
+          };
+        }
+        
+        if (blockToAdd) {
+          blocks.push(blockToAdd);
         }
       }
     }
     
     // Add divider between sections
-    blocks.push({ object: 'block', type: 'divider', divider: {} });
+    if (sections.indexOf(section) < sections.length - 1) {
+      blocks.push({ object: 'block', type: 'divider', divider: {} });
+    }
   }
   
-  // Create the page with blocks (Notion allows max 100 blocks per request)
+  // Create the page with first 100 blocks
   const pageData = {
     parent: { page_id: process.env.NOTION_CLEANED_PARENT_PAGE_ID },
     properties: {
       title: {
         title: [{
-          text: { content: `${data.company || 'Company'} - Cleaned for Presentation` }
+          text: { content: `${companyName} - Cleaned for Presentation` }
         }]
       }
     },
-    children: blocks.slice(0, 100) // First 100 blocks
+    children: blocks.slice(0, 100)
   };
   
+  console.log(`Creating page with ${Math.min(blocks.length, 100)} initial blocks`);
   const response = await notion.pages.create(pageData);
   
-  // If there are more than 100 blocks, add them in batches
+  // Add remaining blocks in batches of 100
   if (blocks.length > 100) {
     const remainingBlocks = blocks.slice(100);
-    const batches = [];
+    console.log(`Adding ${remainingBlocks.length} additional blocks in batches`);
     
     for (let i = 0; i < remainingBlocks.length; i += 100) {
-      batches.push(remainingBlocks.slice(i, i + 100));
-    }
-    
-    for (const batch of batches) {
+      const batch = remainingBlocks.slice(i, Math.min(i + 100, remainingBlocks.length));
+      console.log(`Adding batch of ${batch.length} blocks`);
+      
       await notion.blocks.children.append({
         block_id: response.id,
         children: batch
