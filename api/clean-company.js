@@ -5,9 +5,92 @@ const notion = new Client({
   auth: process.env.NOTION_TOKEN,
 });
 
+// Your standard TOC structure with Clay section mappings
+const STANDARD_STRUCTURE = {
+  'Part 1: Company Overview': [
+    {
+      title: '1. Company Snapshot',
+      clayMarkers: ['COMPANY SNAPSHOT', 'Company Overview', 'Company Name:', 'Year Founded:', 'Location:', 'Website:']
+    },
+    {
+      title: '2. Product Overview',
+      clayMarkers: ['PRODUCT_OVERVIEW', 'PRODUCT OVERVIEW', 'KEY MODULES', 'FEATURES']
+    },
+    {
+      title: '3. Vertical Specificity',
+      clayMarkers: ['VERTICAL SPECIFICITY', 'VERTICAL-SPECIFIC CAPABILITIES', 'VERTICAL CAPABILITIES']
+    },
+    {
+      title: '4. Customer Overview',
+      clayMarkers: ['CUSTOMER PROFILE', 'CUSTOMER OVERVIEW', 'TARGET CUSTOMER']
+    },
+    {
+      title: '5. ICP Analysis',
+      clayMarkers: ['ICP Analysis', 'IDEAL CUSTOMER PROFILE', 'ICP DEEP']
+    },
+    {
+      title: '6. Customer Jobs to be Done',
+      clayMarkers: ['JOBS TO BE DONE', 'Customer_Jobs_To_Be_Done', 'KEY JOBS', 'JTBD']
+    },
+    {
+      title: '7. Customer Success Stories',
+      clayMarkers: ['SUCCESS STORIES', 'CUSTOMER STORIES', 'CASE STUDIES']
+    },
+    {
+      title: '8. Market Overview',
+      clayMarkers: ['MARKET OVERVIEW', 'Market_Overview', 'MARKET ANALYSIS']
+    },
+    {
+      title: '9. TAM / SAM / SOM',
+      clayMarkers: ['TAM', 'SAM', 'SOM', 'TAM_Estimation', 'MARKET SIZE']
+    },
+    {
+      title: '10. Competitive Analysis',
+      clayMarkers: ['COMPETITIVE ANALYSIS', 'COMPETITIVE_ANALYSIS_CLEAN', 'COMPETITION']
+    },
+    {
+      title: '11. Competitive Market Map',
+      clayMarkers: ['COMPETITIVE MARKET MAP', 'MARKET MAP', 'COMPETITIVE_MARKET_MAP']
+    }
+  ],
+  'Part 2: Control Points Analysis': [
+    {
+      title: '1. Data Gravity Analysis',
+      clayMarkers: ['Data Gravity', 'DATA GRAVITY', 'Data Integration']
+    },
+    {
+      title: '2. Workflow Gravity Analysis',
+      clayMarkers: ['Workflow Gravity', 'WORKFLOW GRAVITY', 'WG_Part', 'Workflow Integration']
+    },
+    {
+      title: '3. Account Gravity Analysis',
+      clayMarkers: ['Account Gravity', 'ACCOUNT GRAVITY', 'Customer Lock-in']
+    },
+    {
+      title: '4. Network Effects Analysis',
+      clayMarkers: ['Network Effects', 'NETWORK EFFECTS', 'Network Value']
+    },
+    {
+      title: '5. Ecosystem Control Points Analysis',
+      clayMarkers: ['Ecosystem Control', 'ECO_CP', 'ECOSYSTEM', 'Platform Effects']
+    },
+    {
+      title: '6. Product Extension Analysis',
+      clayMarkers: ['Product Extension', 'PRODUCT EXTENSION', 'Expansion Potential']
+    },
+    {
+      title: '7. Final Control Points Conclusions',
+      clayMarkers: ['Final Control Points', 'CONTROL POINTS CONCLUSION', 'Final - Conclusion']
+    },
+    {
+      title: '8. Final Total Score and Classification',
+      clayMarkers: ['Final_Total_Score', 'Classification_Final', 'TOTAL SCORE', 'Overall Score']
+    }
+  ]
+};
+
 export default async function handler(req, res) {
-  console.log('Function invoked with method:', req.method);
-  console.log('Request body:', req.body);
+  console.log('Function invoked');
   
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -16,81 +99,37 @@ export default async function handler(req, res) {
   const { pageId } = req.body;
 
   if (!pageId) {
-    console.error('No pageId provided in request');
     return res.status(400).json({ error: 'pageId is required' });
   }
 
-  if (!process.env.NOTION_TOKEN) {
-    console.error('NOTION_TOKEN not configured');
-    return res.status(500).json({ error: 'Notion token not configured' });
-  }
-
-  if (!process.env.NOTION_CLEANED_PARENT_PAGE_ID) {
-    console.error('NOTION_CLEANED_PARENT_PAGE_ID not configured');
-    return res.status(500).json({ error: 'Parent page ID not configured' });
+  if (!process.env.NOTION_TOKEN || !process.env.NOTION_CLEANED_PARENT_PAGE_ID) {
+    return res.status(500).json({ error: 'Missing configuration' });
   }
 
   try {
     console.log(`Processing page: ${pageId}`);
     
-    // Fetch the page blocks
-    const response = await notion.blocks.children.list({
-      block_id: pageId,
-      page_size: 100,
-    });
-
-    console.log('Fetched blocks count:', response.results.length);
+    // Fetch all content from Clay page
+    const rawContent = await fetchAllContent(pageId);
     
-    // Extract text from all blocks
-    let rawContent = '';
-    let hasMore = true;
-    let nextCursor = response.has_more ? response.next_cursor : null;
-    let allBlocks = response.results;
-
-    // Get all blocks if paginated
-    while (hasMore && nextCursor) {
-      const nextResponse = await notion.blocks.children.list({
-        block_id: pageId,
-        page_size: 100,
-        start_cursor: nextCursor
-      });
-      allBlocks = [...allBlocks, ...nextResponse.results];
-      hasMore = nextResponse.has_more;
-      nextCursor = nextResponse.next_cursor;
-    }
-
-    console.log('Total blocks fetched:', allBlocks.length);
-
-    // Extract text from blocks - preserve the exact structure
-    const contentLines = [];
-    for (const block of allBlocks) {
-      const text = extractTextFromBlock(block);
-      if (text) {
-        contentLines.push(text);
-      }
-    }
-
-    rawContent = contentLines.join('\n');
-    console.log('Content length:', rawContent.length);
-    console.log('First 500 chars:', rawContent.substring(0, 500));
-
     if (!rawContent.trim()) {
-      console.error('No content found in page');
       return res.status(400).json({ error: 'No content found in source page' });
     }
-
+    
+    console.log('Raw content length:', rawContent.length);
+    
     // Extract company name
     const companyName = extractCompanyName(rawContent);
     console.log('Company:', companyName);
-
-    // Create sections based on === markers
-    const sections = parseClayContent(rawContent);
-    console.log('Sections found:', sections.length);
-
-    // Create the cleaned page
-    const newPageId = await createCleanedPage(companyName, sections);
     
-    console.log('Success! New page:', newPageId);
+    // Map content to standard structure
+    const structuredContent = mapToStandardStructure(rawContent);
+    console.log('Sections mapped:', Object.keys(structuredContent).length);
+    
+    // Create the cleaned page
+    const newPageId = await createCleanedPage(companyName, structuredContent);
+    
+    console.log('Success! Created page:', newPageId);
     return res.status(200).json({ 
       success: true, 
       pageId: newPageId,
@@ -98,219 +137,279 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error('Error processing page:', error);
-    console.error('Error details:', error.message);
-    if (error.code) console.error('Error code:', error.code);
-    if (error.status) console.error('Error status:', error.status);
-    
+    console.error('Error:', error.message);
     return res.status(500).json({ 
       error: 'Failed to process page',
-      details: error.message,
-      code: error.code
+      details: error.message 
     });
   }
+}
+
+async function fetchAllContent(pageId) {
+  let allBlocks = [];
+  let hasMore = true;
+  let startCursor = undefined;
+  
+  while (hasMore) {
+    const response = await notion.blocks.children.list({
+      block_id: pageId,
+      page_size: 100,
+      start_cursor: startCursor
+    });
+    
+    allBlocks = [...allBlocks, ...response.results];
+    hasMore = response.has_more;
+    startCursor = response.next_cursor;
+  }
+  
+  // Extract text from all blocks
+  let content = '';
+  for (const block of allBlocks) {
+    const text = extractTextFromBlock(block);
+    if (text) {
+      content += text + '\n';
+    }
+  }
+  
+  return content;
 }
 
 function extractTextFromBlock(block) {
-  let text = '';
+  const type = block.type;
+  const blockData = block[type];
   
-  // Handle different block types
-  if (block.type === 'paragraph' && block.paragraph?.rich_text) {
-    text = block.paragraph.rich_text.map(t => t.plain_text).join('');
-  } else if (block.type === 'heading_1' && block.heading_1?.rich_text) {
-    text = '# ' + block.heading_1.rich_text.map(t => t.plain_text).join('');
-  } else if (block.type === 'heading_2' && block.heading_2?.rich_text) {
-    text = '## ' + block.heading_2.rich_text.map(t => t.plain_text).join('');
-  } else if (block.type === 'heading_3' && block.heading_3?.rich_text) {
-    text = '### ' + block.heading_3.rich_text.map(t => t.plain_text).join('');
-  } else if (block.type === 'bulleted_list_item' && block.bulleted_list_item?.rich_text) {
-    text = '• ' + block.bulleted_list_item.rich_text.map(t => t.plain_text).join('');
-  } else if (block.type === 'numbered_list_item' && block.numbered_list_item?.rich_text) {
-    text = block.numbered_list_item.rich_text.map(t => t.plain_text).join('');
-  } else if (block.type === 'code' && block.code?.rich_text) {
-    text = block.code.rich_text.map(t => t.plain_text).join('');
-  } else if (block.type === 'quote' && block.quote?.rich_text) {
-    text = '"' + block.quote.rich_text.map(t => t.plain_text).join('') + '"';
+  if (!blockData) return '';
+  
+  if (blockData.rich_text && Array.isArray(blockData.rich_text)) {
+    return blockData.rich_text.map(rt => rt.plain_text || '').join('');
   }
   
-  return text;
+  if (blockData.caption && Array.isArray(blockData.caption)) {
+    return blockData.caption.map(rt => rt.plain_text || '').join('');
+  }
+  
+  return '';
 }
 
-function extractCompanyName(content) {
-  // Try to find company name
+function extractCompanyName(text) {
   const patterns = [
-    /Company Name:\s*([^\n\-]+)/i,
-    /^#\s+CLAY_RAW_(.+?)(?:\s|$)/m,
-    /^#\s+(.+?)(?:\s+-|$)/m,
-    /^(.+?)\.(?:com|io|ai|app)\b/i,
+    /CLAY_RAW_(.+?)(?:\s|$)/i,
+    /Company Name:\s*(.+?)(?:\n|$)/i,
+    /Company_Name_Presentation:\s*(.+?)(?:\n|$)/i,
+    /^#\s+(.+?)(?:\n|$)/m,
   ];
-
+  
   for (const pattern of patterns) {
-    const match = content.match(pattern);
-    if (match) {
-      return match[1].trim().replace(/_/g, ' ');
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      return match[1].trim()
+        .replace(/_/g, ' ')
+        .replace(/\.(?:com|io|ai|app)$/, '');
     }
   }
-
+  
   return 'Company';
 }
 
-function parseClayContent(content) {
-  const sections = [];
+function mapToStandardStructure(rawContent) {
+  const mappedContent = {};
   
-  // Split by === markers - these denote main sections in Clay
-  const parts = content.split(/===+/);
-  
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i].trim();
-    if (!part) continue;
+  // Process each part of the standard structure
+  for (const [partName, sections] of Object.entries(STANDARD_STRUCTURE)) {
+    mappedContent[partName] = [];
     
-    // First line is usually the section title
-    const lines = part.split('\n');
-    const firstLine = lines[0].trim();
-    
-    // Check if this looks like a section header
-    if (firstLine && (
-      firstLine.match(/^\d+\.?\s+/) || // Numbered section
-      firstLine.match(/^[IVX]+\.?\s+/) || // Roman numerals
-      firstLine.match(/SNAPSHOT|SUMMARY|CAPABILITIES|PROFILE|PROPOSITION|TECHNOLOGY|CONTROL|INTEGRATION|STORIES|JOBS|FRAMEWORK/i)
-    )) {
-      const sectionTitle = firstLine.replace(/^[\d\.IVX]+\s+/, '').trim();
-      const sectionContent = lines.slice(1).join('\n').trim();
+    for (const section of sections) {
+      const sectionContent = extractSectionContent(rawContent, section.clayMarkers);
       
-      if (sectionTitle) {
-        sections.push({
-          title: sectionTitle,
-          content: cleanContent(sectionContent)
+      if (sectionContent) {
+        mappedContent[partName].push({
+          title: section.title,
+          content: cleanAndPolish(sectionContent)
         });
-      }
-    } else if (part.length > 50) {
-      // If no clear title, use generic section name
-      sections.push({
-        title: `Section ${sections.length + 1}`,
-        content: cleanContent(part)
-      });
-    }
-  }
-  
-  // If no sections found with ===, try splitting by *** markers
-  if (sections.length === 0) {
-    const altParts = content.split(/\*\*\*+/);
-    for (const part of altParts) {
-      if (part.trim().length > 50) {
-        sections.push({
-          title: `Section ${sections.length + 1}`,
-          content: cleanContent(part.trim())
+      } else {
+        // Add placeholder if section not found
+        mappedContent[partName].push({
+          title: section.title,
+          content: '[Content not found in source data]'
         });
       }
     }
   }
   
-  // If still no sections, treat entire content as one section
-  if (sections.length === 0) {
-    sections.push({
-      title: 'Content',
-      content: cleanContent(content)
-    });
-  }
-  
-  return sections;
+  return mappedContent;
 }
 
-function cleanContent(text) {
-  // Light cleaning while preserving all content
+function extractSectionContent(rawContent, markers) {
+  // Try to find content for any of the markers
+  for (const marker of markers) {
+    // Try === delimited sections first
+    const sectionRegex = new RegExp(`===\\s*[^=]*${escapeRegex(marker)}[^=]*===([\\s\\S]*?)(?:===|\\*\\*\\*|$)`, 'i');
+    let match = rawContent.match(sectionRegex);
+    
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+    
+    // Try other patterns
+    const altRegex = new RegExp(`${escapeRegex(marker)}[:\\s]+([\\s\\S]*?)(?:===|\\*\\*\\*|\\n\\n[A-Z][A-Z\\s]+:|$)`, 'i');
+    match = rawContent.match(altRegex);
+    
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
   
-  // Remove repetitive phrases
-  text = text.replace(/Strategic takeaway:[^.]+\./gi, '');
+  return null;
+}
+
+function escapeRegex(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function cleanAndPolish(text) {
+  // Remove filler phrases while preserving key content
+  const fillers = [
+    /Strategic takeaway:[^\n]+\n?/gi,
+    /It's worth noting that\s*/gi,
+    /In practical terms,\s*/gi,
+    /Generally speaking,\s*/gi,
+    /As mentioned previously,\s*/gi,
+    /Furthermore,\s*/gi,
+    /Additionally,\s*/gi,
+    /Moreover,\s*/gi,
+  ];
   
-  // Remove filler phrases
-  text = text.replace(/It's worth noting that\s*/gi, '');
-  text = text.replace(/In practical terms,\s*/gi, '');
-  text = text.replace(/Generally speaking,\s*/gi, '');
-  text = text.replace(/As mentioned previously,\s*/gi, '');
+  let cleaned = text;
+  for (const filler of fillers) {
+    cleaned = cleaned.replace(filler, '');
+  }
   
-  // Clean up whitespace
-  text = text.replace(/\n\s*\n\s*\n/g, '\n\n');
-  text = text.replace(/[ \t]+/g, ' ');
+  // Clean up formatting
+  cleaned = cleaned.replace(/\*{3,}/g, '');
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  cleaned = cleaned.replace(/[ \t]+/g, ' ');
   
-  return text.trim();
+  // Format special content
+  cleaned = formatLists(cleaned);
+  cleaned = formatScores(cleaned);
+  cleaned = formatKeyValues(cleaned);
+  
+  return cleaned.trim();
+}
+
+function formatLists(text) {
+  // Convert various list formats to consistent bullets
+  text = text.replace(/^[-*]\s+/gm, '• ');
+  text = text.replace(/^\d+\)\s+/gm, (match, offset) => {
+    const lineNum = text.substring(0, offset).split('\n').length;
+    return `${lineNum}. `;
+  });
+  return text;
+}
+
+function formatScores(text) {
+  // Highlight scores (e.g., "8/10" or "29/30")
+  return text.replace(/(\d+\/\d+)/g, '**$1**');
+}
+
+function formatKeyValues(text) {
+  // Bold keys in key-value pairs
+  return text.replace(/^([A-Za-z][A-Za-z\s]+):\s+(.+)$/gm, '**$1:** $2');
 }
 
 function splitText(text, maxLength = 1900) {
-  if (text.length <= maxLength) return [text];
+  if (!text || text.length <= maxLength) return [text];
   
   const chunks = [];
-  
-  // First try to split by paragraphs (double newlines)
   const paragraphs = text.split(/\n\n+/);
   let currentChunk = '';
   
-  for (const paragraph of paragraphs) {
-    if (paragraph.length > maxLength) {
-      // If single paragraph is too long, split by sentences
+  for (const para of paragraphs) {
+    if (para.length > maxLength) {
       if (currentChunk) {
         chunks.push(currentChunk.trim());
         currentChunk = '';
       }
       
-      const sentences = paragraph.match(/[^.!?]+[.!?]+/g) || [paragraph];
+      // Split long paragraph by sentences
+      const sentences = para.split(/(?<=[.!?])\s+/);
       for (const sentence of sentences) {
         if (sentence.length > maxLength) {
-          // If single sentence is too long, force split
+          // Force split by words
           if (currentChunk) {
             chunks.push(currentChunk.trim());
             currentChunk = '';
           }
           
-          // Split long sentence by words
           const words = sentence.split(/\s+/);
-          let tempChunk = '';
+          let wordChunk = '';
           for (const word of words) {
-            if ((tempChunk + ' ' + word).length > maxLength) {
-              if (tempChunk) chunks.push(tempChunk.trim());
-              tempChunk = word;
+            if ((wordChunk + ' ' + word).length > maxLength) {
+              if (wordChunk) chunks.push(wordChunk.trim());
+              wordChunk = word;
             } else {
-              tempChunk += (tempChunk ? ' ' : '') + word;
+              wordChunk += (wordChunk ? ' ' : '') + word;
             }
           }
-          if (tempChunk) chunks.push(tempChunk.trim());
+          if (wordChunk) currentChunk = wordChunk;
         } else if ((currentChunk + ' ' + sentence).length > maxLength) {
-          if (currentChunk) chunks.push(currentChunk.trim());
+          chunks.push(currentChunk.trim());
           currentChunk = sentence;
         } else {
           currentChunk += (currentChunk ? ' ' : '') + sentence;
         }
       }
-    } else if ((currentChunk + '\n\n' + paragraph).length > maxLength) {
-      if (currentChunk) chunks.push(currentChunk.trim());
-      currentChunk = paragraph;
+    } else if ((currentChunk + '\n\n' + para).length > maxLength) {
+      chunks.push(currentChunk.trim());
+      currentChunk = para;
     } else {
-      currentChunk += (currentChunk ? '\n\n' : '') + paragraph;
+      currentChunk += (currentChunk ? '\n\n' : '') + para;
     }
   }
   
-  if (currentChunk) chunks.push(currentChunk.trim());
+  if (currentChunk) {
+    chunks.push(currentChunk.trim());
+  }
   
   return chunks;
 }
 
-async function createCleanedPage(companyName, sections) {
+async function createCleanedPage(companyName, structuredContent) {
   const blocks = [];
   
-  // Title
+  // Main title
   blocks.push({
     object: 'block',
     type: 'heading_1',
     heading_1: {
       rich_text: [{
         type: 'text',
-        text: { content: `${companyName} - Cleaned for Presentation` }
+        text: { content: `${companyName} Overview - Cleaned for Presentation` }
       }]
     }
   });
   
-  // Table of Contents
-  if (sections.length > 1) {
+  // Process Part 1: Company Overview
+  if (structuredContent['Part 1: Company Overview']) {
+    blocks.push({
+      object: 'block',
+      type: 'divider',
+      divider: {}
+    });
+    
+    blocks.push({
+      object: 'block',
+      type: 'heading_1',
+      heading_1: {
+        rich_text: [{
+          type: 'text',
+          text: { content: 'Part 1: Company Overview' },
+          annotations: { bold: true }
+        }]
+      }
+    });
+    
+    // Table of Contents for Part 1
     blocks.push({
       object: 'block',
       type: 'heading_2',
@@ -319,9 +418,8 @@ async function createCleanedPage(companyName, sections) {
       }
     });
     
-    // Add TOC items
-    for (let i = 0; i < sections.length; i++) {
-      const tocText = `${i + 1}. ${sections[i].title}`;
+    for (const section of structuredContent['Part 1: Company Overview']) {
+      const tocText = section.title;
       if (tocText.length <= 2000) {
         blocks.push({
           object: 'block',
@@ -333,110 +431,83 @@ async function createCleanedPage(companyName, sections) {
       }
     }
     
-    // Divider after TOC
     blocks.push({ object: 'block', type: 'divider', divider: {} });
-  }
-  
-  // Add each section
-  for (const section of sections) {
-    // Section heading
-    blocks.push({
-      object: 'block',
-      type: 'heading_2',
-      heading_2: {
-        rich_text: [{ type: 'text', text: { content: section.title } }]
-      }
-    });
     
-    // Section content - split if needed
-    const contentChunks = splitText(section.content);
-    
-    for (const chunk of contentChunks) {
-      // Detect what type of content this is
-      const lines = chunk.split('\n');
+    // Add Part 1 sections
+    for (const section of structuredContent['Part 1: Company Overview']) {
+      blocks.push({
+        object: 'block',
+        type: 'heading_2',
+        heading_2: {
+          rich_text: [{ type: 'text', text: { content: section.title } }]
+        }
+      });
       
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-        if (!trimmedLine) continue;
-        
-        let blockToAdd = null;
-        
-        // Check if it's a bullet point
-        if (trimmedLine.startsWith('• ') || trimmedLine.startsWith('- ') || trimmedLine.startsWith('* ')) {
-          const bulletContent = trimmedLine.replace(/^[•\-*]\s+/, '');
-          if (bulletContent.length <= 2000) {
-            blockToAdd = {
-              object: 'block',
-              type: 'bulleted_list_item',
-              bulleted_list_item: {
-                rich_text: [{ type: 'text', text: { content: bulletContent } }]
-              }
-            };
-          }
-        }
-        // Check if it's a key-value pair
-        else if (trimmedLine.includes(':') && trimmedLine.indexOf(':') < 50) {
-          const colonIndex = trimmedLine.indexOf(':');
-          const key = trimmedLine.substring(0, colonIndex).trim();
-          const value = trimmedLine.substring(colonIndex + 1).trim();
-          
-          if (key.length + value.length <= 1900) {
-            blockToAdd = {
-              object: 'block',
-              type: 'paragraph',
-              paragraph: {
-                rich_text: [
-                  { type: 'text', text: { content: key + ': ' }, annotations: { bold: true } },
-                  { type: 'text', text: { content: value } }
-                ]
-              }
-            };
-          } else {
-            // If too long, just add as regular paragraph
-            blockToAdd = {
-              object: 'block',
-              type: 'paragraph',
-              paragraph: {
-                rich_text: [{ type: 'text', text: { content: trimmedLine.substring(0, 1900) } }]
-              }
-            };
-          }
-        }
-        // Check if it's a score (e.g., "Something: 8/10")
-        else if (trimmedLine.match(/:\s*\d+\/\d+/)) {
-          blockToAdd = {
-            object: 'block',
-            type: 'callout',
-            callout: {
-              rich_text: [{ type: 'text', text: { content: trimmedLine } }],
-              icon: { emoji: '📊' }
-            }
-          };
-        }
-        // Default to paragraph
-        else if (trimmedLine.length <= 2000) {
-          blockToAdd = {
-            object: 'block',
-            type: 'paragraph',
-            paragraph: {
-              rich_text: [{ type: 'text', text: { content: trimmedLine } }]
-            }
-          };
-        }
-        
-        if (blockToAdd) {
-          blocks.push(blockToAdd);
-        }
-      }
-    }
-    
-    // Add divider between sections
-    if (sections.indexOf(section) < sections.length - 1) {
+      // Process section content
+      const contentBlocks = processContent(section.content);
+      blocks.push(...contentBlocks);
+      
       blocks.push({ object: 'block', type: 'divider', divider: {} });
     }
   }
   
-  // Create the page with first 100 blocks
+  // Process Part 2: Control Points Analysis
+  if (structuredContent['Part 2: Control Points Analysis']) {
+    blocks.push({
+      object: 'block',
+      type: 'heading_1',
+      heading_1: {
+        rich_text: [{
+          type: 'text',
+          text: { content: 'Part 2: Control Points Analysis' },
+          annotations: { bold: true }
+        }]
+      }
+    });
+    
+    // Table of Contents for Part 2
+    blocks.push({
+      object: 'block',
+      type: 'heading_2',
+      heading_2: {
+        rich_text: [{ type: 'text', text: { content: 'Control Points Sections' } }]
+      }
+    });
+    
+    for (const section of structuredContent['Part 2: Control Points Analysis']) {
+      const tocText = section.title;
+      if (tocText.length <= 2000) {
+        blocks.push({
+          object: 'block',
+          type: 'numbered_list_item',
+          numbered_list_item: {
+            rich_text: [{ type: 'text', text: { content: tocText } }]
+          }
+        });
+      }
+    }
+    
+    blocks.push({ object: 'block', type: 'divider', divider: {} });
+    
+    // Add Part 2 sections
+    for (const section of structuredContent['Part 2: Control Points Analysis']) {
+      blocks.push({
+        object: 'block',
+        type: 'heading_2',
+        heading_2: {
+          rich_text: [{ type: 'text', text: { content: section.title } }]
+        }
+      });
+      
+      // Process section content with special handling for scores
+      const contentBlocks = processContent(section.content, section.title.includes('Score') || section.title.includes('Control Points'));
+      blocks.push(...contentBlocks);
+      
+      blocks.push({ object: 'block', type: 'divider', divider: {} });
+    }
+  }
+  
+  // Create page with blocks
   const pageData = {
     parent: { page_id: process.env.NOTION_CLEANED_PARENT_PAGE_ID },
     properties: {
@@ -449,18 +520,13 @@ async function createCleanedPage(companyName, sections) {
     children: blocks.slice(0, 100)
   };
   
-  console.log(`Creating page with ${Math.min(blocks.length, 100)} initial blocks`);
   const response = await notion.pages.create(pageData);
   
-  // Add remaining blocks in batches of 100
+  // Add remaining blocks if needed
   if (blocks.length > 100) {
-    const remainingBlocks = blocks.slice(100);
-    console.log(`Adding ${remainingBlocks.length} additional blocks in batches`);
-    
-    for (let i = 0; i < remainingBlocks.length; i += 100) {
-      const batch = remainingBlocks.slice(i, Math.min(i + 100, remainingBlocks.length));
-      console.log(`Adding batch of ${batch.length} blocks`);
-      
+    const remaining = blocks.slice(100);
+    for (let i = 0; i < remaining.length; i += 100) {
+      const batch = remaining.slice(i, Math.min(i + 100, remaining.length));
       await notion.blocks.children.append({
         block_id: response.id,
         children: batch
@@ -469,4 +535,111 @@ async function createCleanedPage(companyName, sections) {
   }
   
   return response.id;
+}
+
+function processContent(content, isScoreSection = false) {
+  const blocks = [];
+  
+  if (content === '[Content not found in source data]') {
+    blocks.push({
+      object: 'block',
+      type: 'callout',
+      callout: {
+        rich_text: [{ type: 'text', text: { content: content } }],
+        icon: { emoji: '⚠️' },
+        color: 'yellow_background'
+      }
+    });
+    return blocks;
+  }
+  
+  const lines = content.split('\n');
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    
+    // Handle bullets
+    if (trimmed.startsWith('•')) {
+      const bulletText = trimmed.substring(1).trim();
+      const chunks = splitText(bulletText);
+      for (const chunk of chunks) {
+        blocks.push({
+          object: 'block',
+          type: 'bulleted_list_item',
+          bulleted_list_item: {
+            rich_text: [{ type: 'text', text: { content: chunk } }]
+          }
+        });
+      }
+    }
+    // Handle numbered items
+    else if (trimmed.match(/^\d+\./)) {
+      const numberedText = trimmed.replace(/^\d+\.\s*/, '');
+      const chunks = splitText(numberedText);
+      for (const chunk of chunks) {
+        blocks.push({
+          object: 'block',
+          type: 'numbered_list_item',
+          numbered_list_item: {
+            rich_text: [{ type: 'text', text: { content: chunk } }]
+          }
+        });
+      }
+    }
+    // Handle scores with callout
+    else if (trimmed.match(/\d+\/\d+/) && (isScoreSection || trimmed.includes('Score'))) {
+      blocks.push({
+        object: 'block',
+        type: 'callout',
+        callout: {
+          rich_text: [{ type: 'text', text: { content: trimmed } }],
+          icon: { emoji: '📊' },
+          color: 'blue_background'
+        }
+      });
+    }
+    // Handle bold key-value pairs
+    else if (trimmed.includes('**') && trimmed.includes(':')) {
+      const parts = trimmed.split('**').filter(p => p);
+      const richText = [];
+      
+      for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 1) {
+          // This is bold text
+          richText.push({
+            type: 'text',
+            text: { content: parts[i] },
+            annotations: { bold: true }
+          });
+        } else {
+          richText.push({
+            type: 'text',
+            text: { content: parts[i] }
+          });
+        }
+      }
+      
+      blocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: { rich_text: richText }
+      });
+    }
+    // Regular paragraph
+    else {
+      const chunks = splitText(trimmed);
+      for (const chunk of chunks) {
+        blocks.push({
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [{ type: 'text', text: { content: chunk } }]
+          }
+        });
+      }
+    }
+  }
+  
+  return blocks;
 }
