@@ -1,5 +1,6 @@
-// api/clean-company.js
-// Presentation-ready cleaner with fixed structure
+// api/clean-notion.js
+// Universal Notion Data Cleaner with proper character limit handling
+// Adapts to any Clay data structure and respects Notion's 2000 char limits
 
 import { Client } from '@notionhq/client';
 
@@ -7,60 +8,61 @@ const notion = new Client({
   auth: process.env.NOTION_TOKEN,
 });
 
-// Fixed presentation structure
-const PRESENTATION_STRUCTURE = {
-  tableOfContents: [
-    'I. COMPANY OVERVIEW',
-    '   a. Company Snapshot',
-    '   b. Executive Summary',
-    '   c. Business and Product Description',
-    '   d. Customer Overview',
-    '   e. Core Jobs to be Done',
-    '   f. Customer Success Stories',
-    '   g. Tech Market Map',
-    '   h. Competitive Landscape',
-    'II. CONTROL POINTS ANALYSIS',
-    '   a. Data Gravity Analysis',
-    '   b. Workflow Gravity Analysis',
-    '   c. Account Gravity Analysis',
-    '   d. Network Effects Analysis',
-    '   e. Ecosystem Control Points',
-    '   f. Product Extension Analysis',
-    '   g. Final Score and Classification',
-    'III. STRATEGIC RECOMMENDATIONS'
-  ]
-};
-
+// Main handler
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
 
   try {
     const { pageId } = req.body;
-    console.log('Processing:', pageId);
     
+    if (!pageId) {
+      return res.status(400).json({ error: 'Page ID is required' });
+    }
+
+    console.log('Starting to process page:', pageId);
+    
+    // Fetch raw content
     const rawContent = await fetchNotionContent(pageId);
-    const presentationData = createPresentationStructure(rawContent);
-    const newPage = await createPresentationPage(presentationData);
+    console.log('Fetched content length:', rawContent.length);
+    
+    // Process and structure the data
+    const cleanedData = processClayData(rawContent);
+    console.log('Processed company:', cleanedData.companyName);
+    
+    // Create the cleaned page
+    const newPageId = await createCleanedPage(cleanedData);
+    console.log('Created cleaned page:', newPageId);
     
     return res.status(200).json({ 
       success: true,
-      cleanPageId: newPage.id,
-      cleanPageUrl: newPage.url
+      cleanPageId: newPageId,
+      companyName: cleanedData.companyName,
+      message: `Successfully cleaned data for ${cleanedData.companyName}`
     });
     
   } catch (error) {
-    console.error('Error:', error);
-    return res.status(500).json({ error: error.message });
+    console.error('Processing error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to process company data',
+      details: error.message 
+    });
   }
 }
 
+// Fetch all content from Notion page
 async function fetchNotionContent(pageId) {
   try {
-    let content = '';
+    let fullContent = '';
     let hasMore = true;
     let cursor = undefined;
     
@@ -72,8 +74,9 @@ async function fetchNotionContent(pageId) {
       });
       
       for (const block of response.results) {
-        if (block.type === 'paragraph' && block.paragraph.rich_text) {
-          content += block.paragraph.rich_text.map(t => t.plain_text).join('') + '\n';
+        const text = extractTextFromBlock(block);
+        if (text) {
+          fullContent += text + '\n';
         }
       }
       
@@ -81,164 +84,183 @@ async function fetchNotionContent(pageId) {
       cursor = response.next_cursor;
     }
     
-    return content;
+    return fullContent;
   } catch (error) {
-    throw new Error('Failed to fetch: ' + error.message);
+    throw new Error(`Failed to fetch Notion content: ${error.message}`);
   }
 }
 
-function createPresentationStructure(raw) {
-  // Extract and clean key information
-  const companyName = extractCompanyName(raw);
-  const snapshot = extractSnapshot(raw);
-  
-  // Build presentation sections
-  const presentation = {
-    companyName: companyName,
-    snapshot: snapshot,
-    executiveSummary: extractExecutiveSummary(raw),
-    problem: extractAndCleanSection(raw, 'SECTION 3: THE PROBLEM'),
-    solution: extractAndCleanSection(raw, 'SECTION 4: THE SOLUTION'),
-    businessDescription: extractAndCleanSection(raw, 'BUSINESS & PRODUCT DESCRIPTION'),
-    customers: extractAndCleanSection(raw, 'CUSTOMERS|TARGET AUDIENCE'),
-    valueProposition: extractAndCleanSection(raw, 'VALUE PROPOSITION'),
-    useCases: extractAndCleanSection(raw, 'USE CASE'),
-    roi: extractAndCleanSection(raw, 'RETURN ON INVESTMENT'),
-    controlPoints: calculateControlPoints(raw)
-  };
-  
-  return presentation;
+// Extract text from any block type
+function extractTextFromBlock(block) {
+  try {
+    switch (block.type) {
+      case 'paragraph':
+      case 'heading_1':
+      case 'heading_2':
+      case 'heading_3':
+        if (block[block.type].rich_text) {
+          return block[block.type].rich_text.map(t => t.plain_text).join('');
+        }
+        break;
+      case 'bulleted_list_item':
+      case 'numbered_list_item':
+        if (block[block.type].rich_text) {
+          return block[block.type].rich_text.map(t => t.plain_text).join('');
+        }
+        break;
+      case 'code':
+        if (block.code.rich_text) {
+          return block.code.rich_text.map(t => t.plain_text).join('');
+        }
+        break;
+      case 'quote':
+        if (block.quote.rich_text) {
+          return block.quote.rich_text.map(t => t.plain_text).join('');
+        }
+        break;
+      case 'callout':
+        if (block.callout.rich_text) {
+          return block.callout.rich_text.map(t => t.plain_text).join('');
+        }
+        break;
+    }
+  } catch (e) {
+    console.log('Error extracting from block type:', block.type);
+  }
+  return '';
 }
 
-function extractCompanyName(raw) {
-  const patterns = [
-    /([A-Za-z]+\.app)/i,
-    /([A-Z][a-zA-Z]+)\s+(?:is|exists|operates)/,
-    /Company Name:\s*([^\n]+)/i
+// Process Clay data and extract structured information
+function processClayData(rawContent) {
+  const data = {
+    companyName: '',
+    snapshot: {},
+    executiveSummary: [],
+    sections: []
+  };
+  
+  // Extract company name (flexible patterns)
+  const namePatterns = [
+    /Company Name[:\s]*([^\n]+)/i,
+    /^([A-Za-z0-9\s.]+?)(?:\s*===|\s*\n)/m,
+    /([A-Za-z]+\.(?:app|ai|io|com))/i,
+    /CLAY_RAW_([^\s.]+)/i
   ];
   
-  for (const pattern of patterns) {
-    const match = raw.match(pattern);
-    if (match) return match[1];
+  for (const pattern of namePatterns) {
+    const match = rawContent.match(pattern);
+    if (match) {
+      data.companyName = match[1].trim().replace(/_/g, ' ');
+      break;
+    }
   }
-  return 'Company';
+  
+  if (!data.companyName) {
+    data.companyName = 'Company Analysis';
+  }
+  
+  // Extract snapshot data
+  data.snapshot = extractSnapshot(rawContent);
+  
+  // Extract executive summary (from paragraphs)
+  const execPattern = /\[Paragraph \d+\]([^[]*?)(?=\[Paragraph|\n===|$)/gi;
+  let execMatch;
+  while ((execMatch = execPattern.exec(rawContent)) !== null) {
+    const text = execMatch[1].trim();
+    if (text && text.length > 50) {
+      data.executiveSummary.push(text);
+    }
+  }
+  
+  // Extract major sections with flexible patterns
+  const sectionPatterns = [
+    { name: 'Introduction', pattern: /=== ?\d*\.?\s*INTRODUCTION ===\s*([^=]+)/i },
+    { name: 'Key Modules & Features', pattern: /=== ?\d*\.?\s*KEY MODULES[^=]*===\s*([^=]+)/i },
+    { name: 'Vertical Capabilities', pattern: /=== ?\d*\.?\s*VERTICAL[^=]*CAPABILITIES[^=]*===\s*([^=]+)/i },
+    { name: 'Value Proposition', pattern: /=== ?\d*\.?\s*(?:CORE )?VALUE PROPOSITION[^=]*===\s*([^=]+)/i },
+    { name: 'Technology', pattern: /=== ?\d*\.?\s*TECHNOLOGY[^=]*===\s*([^=]+)/i },
+    { name: 'Workflows', pattern: /=== ?\d*\.?\s*WORKFLOW[^=]*===\s*([^=]+)/i },
+    { name: 'Customer Profile', pattern: /=== ?\d*\.?\s*(?:ICP|IDEAL CUSTOMER)[^=]*===\s*([^=]+)/i },
+    { name: 'Jobs To Be Done', pattern: /(?:JOBS TO BE DONE|Job \d+:)([^=]+)/i },
+    { name: 'Customer Stories', pattern: /CUSTOMER SUCCESS STORY[^=]*\n([^=]+)/i },
+    { name: 'Market Context', pattern: /=== ?\d*\.?\s*MARKET[^=]*===\s*([^=]+)/i },
+    { name: 'TAM', pattern: /=== ?\d*\.?\s*(?:TAM|TOTAL ADDRESSABLE)[^=]*===\s*([^=]+)/i },
+    { name: 'Competitive', pattern: /=== ?\d*\.?\s*COMPETITIVE[^=]*===\s*([^=]+)/i },
+    { name: 'Control Points', pattern: /CONTROL POINTS[^=]*\n([^*]+)/i }
+  ];
+  
+  for (const { name, pattern } of sectionPatterns) {
+    const match = rawContent.match(pattern);
+    if (match && match[1]) {
+      const content = cleanSectionContent(match[1]);
+      if (content) {
+        data.sections.push({ name, content });
+      }
+    }
+  }
+  
+  // Extract control points score if present
+  const scoreMatch = rawContent.match(/Control Points[:\s]*(\d+\/\d+)/i);
+  if (scoreMatch) {
+    data.snapshot.controlPoints = scoreMatch[1];
+  }
+  
+  const classMatch = rawContent.match(/→\s*(System of \w+)/i);
+  if (classMatch) {
+    data.snapshot.classification = classMatch[1];
+  }
+  
+  return data;
 }
 
-function extractSnapshot(raw) {
-  const snapshot = {
-    yearFounded: 'Not specified',
-    location: 'Not specified',
-    funding: 'Not specified',
-    vertical: 'Vertical SaaS Platform',
-    fteCount: 'Not specified'
+// Extract snapshot information
+function extractSnapshot(content) {
+  const snapshot = {};
+  
+  const patterns = {
+    yearFounded: /Year Founded[:\s]*(\d{4})/i,
+    location: /Location[:\s]*([^\n]+)/i,
+    website: /Website[:\s]*(https?:\/\/[^\s]+)/i,
+    category: /Software Category[^\n]*[:\s]*([^\n]+)/i,
+    fteCount: /FTE Count[:\s]*(\d+)/i,
+    fteGrowth: /FTE growth[:\s]*([0-9.]+%)/i,
+    funding: /(?:Funding|Total Raised)[:\s]*([^\n]+)/i,
+    controlPoints: /Control Points[:\s]*(\d+\/\d+)/i
   };
   
-  // Year Founded
-  const yearMatch = raw.match(/(?:Year Founded|established in|Founded):\s*(\d{4})/i);
-  if (yearMatch) snapshot.yearFounded = yearMatch[1];
-  
-  // Location  
-  const locationMatch = raw.match(/(?:Headquarters|Location|based in):\s*([^\n]+)/i);
-  if (locationMatch) snapshot.location = locationMatch[1].trim();
-  else if (raw.includes('New York')) snapshot.location = 'New York, New York';
-  
-  // Funding
-  const fundingMatch = raw.match(/(?:Total Funding|raised):\s*\$?([^\n]+)/i);
-  if (fundingMatch) snapshot.funding = fundingMatch[1].trim();
-  
-  // Vertical
-  if (raw.includes('sports facility')) snapshot.vertical = 'Sports Facility Management Platform';
-  else if (raw.includes('racket sports')) snapshot.vertical = 'Racket Sports Management Platform';
+  for (const [key, pattern] of Object.entries(patterns)) {
+    const match = content.match(pattern);
+    if (match) {
+      snapshot[key] = match[1].trim();
+    }
+  }
   
   return snapshot;
 }
 
-function extractExecutiveSummary(raw) {
-  // Get the introduction and clean it up
-  const intro = extractAndCleanSection(raw, 'SECTION 1: INTRODUCTION');
-  if (intro) {
-    // Take first 2-3 sentences as executive summary
-    const sentences = intro.split(/(?<=[.!?])\s+/);
-    return sentences.slice(0, 3).join(' ');
-  }
-  
-  // Fallback: look for mission statement
-  const missionMatch = raw.match(/mission is[^.]+\./i);
-  if (missionMatch) return missionMatch[0];
-  
-  return 'Company overview to be added.';
-}
-
-function extractAndCleanSection(raw, sectionPattern) {
-  const regex = new RegExp(sectionPattern + '[^]*?(?=SECTION \\d+:|FOUNDING STORY|BUSINESS & PRODUCT|CUSTOMERS|$)', 'i');
-  const match = raw.match(regex);
-  
-  if (!match) return '';
-  
-  let content = match[0];
-  
-  // Remove the section header
-  content = content.replace(new RegExp(sectionPattern + ':?', 'i'), '');
-  
-  // Clean up the content
-  content = cleanText(content);
-  
-  return content;
-}
-
-function cleanText(text) {
+// Clean section content
+function cleanSectionContent(text) {
   // Remove excessive whitespace
-  text = text.replace(/\s+/g, ' ');
+  text = text.replace(/\s+/g, ' ').trim();
+  
+  // Remove markdown artifacts
+  text = text.replace(/\*{3,}/g, '');
+  text = text.replace(/_{3,}/g, '');
+  text = text.replace(/={3,}/g, '');
   
   // Fix bullet points
-  text = text.replace(/[•·]/g, '•');
+  text = text.replace(/^[-•*]\s*/gm, '• ');
   
-  // Remove duplicate sentences (common in Clay data)
+  // Remove duplicate sentences
   const sentences = text.split(/(?<=[.!?])\s+/);
   const unique = [...new Set(sentences)];
   text = unique.join(' ');
   
-  // Format numbered lists properly
-  text = text.replace(/(\d+)\.\s+/g, '\n$1. ');
-  
-  // Format bullet points properly  
-  text = text.replace(/•\s*/g, '\n• ');
-  
-  // Clean up multiple newlines
-  text = text.replace(/\n{3,}/g, '\n\n');
-  
   return text.trim();
 }
 
-function calculateControlPoints(raw) {
-  const scores = {
-    dataGravity: 0,
-    workflowGravity: 0,
-    accountGravity: 0,
-    networkEffects: 0,
-    ecosystem: 0,
-    productExtension: 0
-  };
-  
-  // Score based on keywords (simplified)
-  if (raw.match(/centralized|unified|single.*source|data.*repository/i)) scores.dataGravity = 4.5;
-  if (raw.match(/automat|workflow|streamlin|process/i)) scores.workflowGravity = 4.5;
-  if (raw.match(/membership|retention|customer.*satisfaction/i)) scores.accountGravity = 4;
-  if (raw.match(/network|viral|social|collaborat/i)) scores.networkEffects = 3.5;
-  if (raw.match(/ecosystem|integrat|platform|API/i)) scores.ecosystem = 4;
-  if (raw.match(/AI|machine.*learning|analytics|predictive/i)) scores.productExtension = 4;
-  
-  const total = Object.values(scores).reduce((a, b) => a + b, 0);
-  
-  let classification = 'POINT SOLUTION';
-  if (total >= 25) classification = 'SYSTEM OF RECORD';
-  else if (total >= 20) classification = 'CORE SAAS';
-  else if (total >= 15) classification = 'SYSTEM OF WORKFLOW';
-  
-  return { scores, total, classification };
-}
-
-async function createPresentationPage(data) {
+// Create the cleaned page in Notion
+async function createCleanedPage(data) {
   const blocks = [];
   
   // Title
@@ -248,236 +270,302 @@ async function createPresentationPage(data) {
     heading_1: {
       rich_text: [{
         type: 'text',
-        text: { content: 'COMPANY OVERVIEW: ' + data.companyName.toUpperCase() },
-        annotations: { bold: true }
+        text: { content: data.companyName }
       }]
     }
   });
   
-  // Fixed Table of Contents
+  // Table of Contents
   blocks.push({
     object: 'block',
     type: 'heading_2',
     heading_2: {
       rich_text: [{
         type: 'text',
-        text: { content: 'TABLE OF CONTENTS' }
+        text: { content: 'Table of Contents' }
       }]
     }
   });
   
-  blocks.push({
-    object: 'block',
-    type: 'paragraph',
-    paragraph: {
-      rich_text: [{
-        type: 'text',
-        text: { content: PRESENTATION_STRUCTURE.tableOfContents.join('\n') }
-      }]
-    }
-  });
-  
-  blocks.push({ object: 'block', type: 'divider', divider: {} });
-  
-  // Company Snapshot
-  blocks.push({
-    object: 'block',
-    type: 'heading_1',
-    heading_1: {
-      rich_text: [{
-        type: 'text',
-        text: { content: 'COMPANY SNAPSHOT' }
-      }]
-    }
-  });
-  
-  const snapshotText = [
-    'Company Name: ' + data.companyName,
-    'Year Founded: ' + data.snapshot.yearFounded,
-    'Location: ' + data.snapshot.location,
-    'Website: ' + data.companyName.toLowerCase().replace(/\s+/g, ''),
-    'Software Category & Vertical: ' + data.snapshot.vertical,
-    'FTE Count: ' + data.snapshot.fteCount,
-    'Funding History: ' + data.snapshot.funding
-  ].join('\n');
-  
-  blocks.push({
-    object: 'block',
-    type: 'paragraph',
-    paragraph: {
-      rich_text: [{
-        type: 'text',
-        text: { content: snapshotText }
-      }]
-    }
-  });
-  
-  // Control Points Callout
-  blocks.push({
-    object: 'block',
-    type: 'callout',
-    callout: {
-      rich_text: [{
-        type: 'text',
-        text: { 
-          content: 'CONTROL POINTS: FINAL SCORE: ' + data.controlPoints.total.toFixed(1) + ' / 30 ——> ' + data.controlPoints.classification
-        },
-        annotations: { bold: true }
-      }],
-      icon: { type: 'emoji', emoji: '⭐' }
-    }
-  });
-  
-  blocks.push({ object: 'block', type: 'divider', divider: {} });
-  
-  // Executive Summary
-  if (data.executiveSummary) {
-    blocks.push({
-      object: 'block',
-      type: 'heading_1',
-      heading_1: {
-        rich_text: [{
-          type: 'text',
-          text: { content: 'EXECUTIVE SUMMARY' }
-        }]
-      }
-    });
-    
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: {
-        rich_text: [{
-          type: 'text',
-          text: { content: data.executiveSummary }
-        }]
-      }
-    });
-  }
-  
-  // Problem & Solution sections
-  const sections = [
-    { title: 'THE PROBLEM', content: data.problem },
-    { title: 'THE SOLUTION', content: data.solution },
-    { title: 'BUSINESS AND PRODUCT DESCRIPTION', content: data.businessDescription },
-    { title: 'CUSTOMER OVERVIEW', content: data.customers },
-    { title: 'VALUE PROPOSITION', content: data.valueProposition },
-    { title: 'USE CASES', content: data.useCases },
-    { title: 'RETURN ON INVESTMENT', content: data.roi }
+  const tocItems = [
+    'Company Snapshot',
+    'Executive Summary',
+    ...data.sections.map(s => s.name)
   ];
   
-  for (const section of sections) {
-    if (section.content) {
-      blocks.push({
-        object: 'block',
-        type: 'heading_1',
-        heading_1: {
-          rich_text: [{
-            type: 'text',
-            text: { content: section.title }
-          }]
-        }
-      });
-      
-      // Add content as formatted blocks
-      formatContentBlocks(blocks, section.content);
-    }
-  }
-  
-  // Create the page
-  const response = await notion.pages.create({
-    parent: { page_id: process.env.NOTION_CLEANED_PARENT_PAGE_ID },
-    icon: { type: 'emoji', emoji: '✨' },
-    cover: {
-      type: 'external',
-      external: {
-        url: 'https://images.unsplash.com/photo-1557804506-669a67965ba0?w=1200&h=300&fit=crop'
-      }
-    },
-    properties: {
-      title: {
-        title: [{
-          text: { content: data.companyName + ' - Cleaned' }
-        }]
-      }
-    },
-    children: blocks.slice(0, 100)
-  });
-  
-  // Add remaining blocks if needed
-  if (blocks.length > 100) {
-    for (let i = 100; i < blocks.length; i += 100) {
-      await notion.blocks.children.append({
-        block_id: response.id,
-        children: blocks.slice(i, Math.min(i + 100, blocks.length))
-      });
-    }
-  }
-  
-  return response;
-}
-
-function formatContentBlocks(blocks, content) {
-  // Split content into proper blocks
-  const lines = content.split('\n');
-  
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    
-    if (trimmed.startsWith('•')) {
-      // Bullet point
-      blocks.push({
-        object: 'block',
-        type: 'bulleted_list_item',
-        bulleted_list_item: {
-          rich_text: [{
-            type: 'text',
-            text: { content: trimmed.substring(1).trim() }
-          }]
-        }
-      });
-    } else if (trimmed.match(/^\d+\./)) {
-      // Numbered list
+  // Add TOC items as numbered list
+  tocItems.forEach((item, index) => {
+    const tocText = `${index + 1}. ${item}`;
+    // Split if too long for Notion's limit
+    if (tocText.length <= 2000) {
       blocks.push({
         object: 'block',
         type: 'numbered_list_item',
         numbered_list_item: {
           rich_text: [{
             type: 'text',
-            text: { content: trimmed.replace(/^\d+\.\s*/, '') }
+            text: { content: tocText }
           }]
         }
       });
-    } else {
-      // Regular paragraph
-      // Split if too long
-      if (trimmed.length > 1900) {
-        const chunks = trimmed.match(/.{1,1900}/g) || [];
-        for (const chunk of chunks) {
-          blocks.push({
-            object: 'block',
-            type: 'paragraph',
-            paragraph: {
-              rich_text: [{
-                type: 'text',
-                text: { content: chunk }
-              }]
-            }
-          });
-        }
-      } else {
+    }
+  });
+  
+  blocks.push({ object: 'block', type: 'divider', divider: {} });
+  
+  // Company Snapshot
+  if (Object.keys(data.snapshot).length > 0) {
+    blocks.push({
+      object: 'block',
+      type: 'heading_2',
+      heading_2: {
+        rich_text: [{
+          type: 'text',
+          text: { content: 'Company Snapshot' }
+        }]
+      }
+    });
+    
+    for (const [key, value] of Object.entries(data.snapshot)) {
+      const label = key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1');
+      const snapshotLine = `${label}: ${value}`;
+      
+      // Check character limit
+      if (snapshotLine.length <= 2000) {
         blocks.push({
           object: 'block',
           type: 'paragraph',
           paragraph: {
             rich_text: [{
               type: 'text',
-              text: { content: trimmed }
+              text: { content: label + ': ' },
+              annotations: { bold: true }
+            }, {
+              type: 'text',
+              text: { content: value }
             }]
           }
         });
       }
     }
+    
+    blocks.push({ object: 'block', type: 'divider', divider: {} });
   }
+  
+  // Executive Summary
+  if (data.executiveSummary.length > 0) {
+    blocks.push({
+      object: 'block',
+      type: 'heading_2',
+      heading_2: {
+        rich_text: [{
+          type: 'text',
+          text: { content: 'Executive Summary' }
+        }]
+      }
+    });
+    
+    data.executiveSummary.forEach(paragraph => {
+      // Split long paragraphs into chunks
+      const chunks = splitIntoChunks(paragraph, 1900);
+      chunks.forEach(chunk => {
+        blocks.push({
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [{
+              type: 'text',
+              text: { content: chunk }
+            }]
+          }
+        });
+      });
+    });
+    
+    blocks.push({ object: 'block', type: 'divider', divider: {} });
+  }
+  
+  // Add each section
+  data.sections.forEach(section => {
+    blocks.push({
+      object: 'block',
+      type: 'heading_2',
+      heading_2: {
+        rich_text: [{
+          type: 'text',
+          text: { content: section.name }
+        }]
+      }
+    });
+    
+    // Process section content
+    const contentBlocks = processContentIntoBlocks(section.content);
+    blocks.push(...contentBlocks);
+    
+    blocks.push({ object: 'block', type: 'divider', divider: {} });
+  });
+  
+  // Create the page with proper parent ID
+  try {
+    const response = await notion.pages.create({
+      parent: {
+        page_id: process.env.NOTION_CLEANED_PARENT_PAGE_ID || process.env.NOTION_PARENT_PAGE_ID
+      },
+      icon: {
+        type: 'emoji',
+        emoji: '📊'
+      },
+      properties: {
+        title: {
+          title: [{
+            text: {
+              content: `${data.companyName} - Cleaned for Presentation`
+            }
+          }]
+        }
+      },
+      children: blocks.slice(0, 100) // First 100 blocks
+    });
+    
+    // Add remaining blocks if there are more than 100
+    if (blocks.length > 100) {
+      for (let i = 100; i < blocks.length; i += 100) {
+        const chunk = blocks.slice(i, Math.min(i + 100, blocks.length));
+        await notion.blocks.children.append({
+          block_id: response.id,
+          children: chunk
+        });
+      }
+    }
+    
+    return response.id;
+  } catch (error) {
+    console.error('Error creating Notion page:', error);
+    throw error;
+  }
+}
+
+// Split text into chunks under 2000 characters
+function splitIntoChunks(text, maxLength = 1900) {
+  const chunks = [];
+  
+  if (text.length <= maxLength) {
+    return [text];
+  }
+  
+  // Try to split at sentence boundaries
+  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+  let currentChunk = '';
+  
+  for (const sentence of sentences) {
+    if ((currentChunk + sentence).length <= maxLength) {
+      currentChunk += sentence;
+    } else {
+      if (currentChunk) {
+        chunks.push(currentChunk.trim());
+      }
+      
+      // If single sentence is too long, split it
+      if (sentence.length > maxLength) {
+        const words = sentence.split(' ');
+        currentChunk = '';
+        
+        for (const word of words) {
+          if ((currentChunk + ' ' + word).length <= maxLength) {
+            currentChunk += (currentChunk ? ' ' : '') + word;
+          } else {
+            if (currentChunk) {
+              chunks.push(currentChunk.trim());
+            }
+            currentChunk = word;
+          }
+        }
+      } else {
+        currentChunk = sentence;
+      }
+    }
+  }
+  
+  if (currentChunk) {
+    chunks.push(currentChunk.trim());
+  }
+  
+  return chunks;
+}
+
+// Process content into properly formatted blocks
+function processContentIntoBlocks(content) {
+  const blocks = [];
+  
+  // Split by line breaks to preserve structure
+  const lines = content.split(/\n+/);
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    
+    // Handle bullet points
+    if (trimmed.startsWith('•') || trimmed.startsWith('-') || trimmed.startsWith('*')) {
+      const bulletContent = trimmed.replace(/^[•\-*]\s*/, '').trim();
+      const chunks = splitIntoChunks(bulletContent, 1900);
+      
+      chunks.forEach((chunk, index) => {
+        blocks.push({
+          object: 'block',
+          type: 'bulleted_list_item',
+          bulleted_list_item: {
+            rich_text: [{
+              type: 'text',
+              text: { content: chunk }
+            }]
+          }
+        });
+      });
+    }
+    // Handle numbered items
+    else if (trimmed.match(/^\d+\./)) {
+      const numberContent = trimmed.replace(/^\d+\.\s*/, '').trim();
+      const chunks = splitIntoChunks(numberContent, 1900);
+      
+      chunks.forEach((chunk) => {
+        blocks.push({
+          object: 'block',
+          type: 'numbered_list_item',
+          numbered_list_item: {
+            rich_text: [{
+              type: 'text',
+              text: { content: chunk }
+            }]
+          }
+        });
+      });
+    }
+    // Regular paragraph
+    else {
+      const chunks = splitIntoChunks(trimmed, 1900);
+      
+      chunks.forEach(chunk => {
+        blocks.push({
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [{
+              type: 'text',
+              text: { content: chunk }
+            }]
+          }
+        });
+      });
+    }
+  }
+  
+  return blocks;
+}
+
+// Helper function to format keys nicely
+function formatKey(key) {
+  return key
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/^./, str => str.toUpperCase())
+    .trim();
 }
