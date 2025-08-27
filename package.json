@@ -2,6 +2,7 @@
   "name": "aql-cleaner",
   "version": "1.0.0",
   "dependencies": {
+    "openai": "^4.0.0",
     "@notionhq/client": "^2.2.13"
   }
 }
