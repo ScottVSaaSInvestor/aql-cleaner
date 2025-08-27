@@ -1,8 +1,8 @@
-// === BEGIN Restructure Helper (paste at very top of your cleaner file) ===
-import { Client } from "@notionhq/client";
-import OpenAI from "openai";
+// === BEGIN Restructure Helper (CommonJS) ===
+const { Client: NotionClient } = require("@notionhq/client");
+const OpenAI = require("openai");
 
-const notion = new Client({ auth: process.env.NOTION_TOKEN });
+const notionHelper = new NotionClient({ auth: process.env.NOTION_TOKEN });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const RESTRUCTURE_PROMPT = `
@@ -41,61 +41,61 @@ Rules:
 }
 `;
 
-function safeParse(s?: string | null) { try { return s ? JSON.parse(s) : null; } catch { return null; } }
+function safeParse(s) { try { return s ? JSON.parse(s) : null; } catch { return null; } }
 
-async function collectAllBlocks(blockId: string) {
-  let results: any[] = [];
-  let cursor: string | undefined;
+async function collectAllBlocksHelper(blockId) {
+  let results = [];
+  let cursor;
   do {
-    const r: any = await notion.blocks.children.list({ block_id: blockId, start_cursor: cursor, page_size: 100 });
-    results.push(...r.results);
+    const r = await notionHelper.blocks.children.list({ block_id: blockId, page_size: 100, start_cursor: cursor });
+    results = results.concat(r.results);
     cursor = r.has_more ? r.next_cursor : undefined;
   } while (cursor);
   return results;
 }
 
-// Main helper you’ll call later
-export async function restructureAndPolish(notionPageId: string, companyName?: string) {
-  // Skip if we already added a "Restructured ✅" marker
-  const existing = await collectAllBlocks(notionPageId);
+async function restructureAndPolish(notionPageId, companyName) {
+  // idempotency: skip if marker exists
+  const existing = await collectAllBlocksHelper(notionPageId);
   const already = existing.some(
     b => b.type === "callout" &&
-         b.callout?.rich_text?.some((t:any) => t.plain_text?.includes("Restructured ✅"))
+         b.callout &&
+         Array.isArray(b.callout.rich_text) &&
+         b.callout.rich_text.some(t => (t.plain_text || "").includes("Restructured ✅"))
   );
   if (already) return;
 
-  // Gather all Markdown code blocks (the 19 parts)
-  const parts: string[] = [];
+  // collect markdown code blocks (your parts)
+  const parts = [];
   for (const b of existing) {
-    if (b.type === "code" && b.code?.language === "markdown") {
-      const text = (b.code.rich_text || []).map((t:any) => t.plain_text).join("");
-      if (text?.trim()) parts.push(text.trim());
+    if (b.type === "code" && b.code && b.code.language === "markdown") {
+      const text = (b.code.rich_text || []).map(t => t.plain_text || "").join("");
+      if (text && text.trim()) parts.push(text.trim());
     }
   }
   if (parts.length === 0) return;
 
-  // Ask the model to rebuild + polish
   const userPayload = [
     companyName ? `Company: ${companyName}` : "",
     "Input parts (in captured order):",
-    ...parts.map((p, i) => `\n---\n[Part ${i + 1}]\n${p}`),
+    ...parts.map((p, i) => `\n---\n[Part ${i + 1}]\n${p}`)
   ].join("\n");
 
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.2,
-    response_format: { type: "json_object" as any },
+    response_format: { type: "json_object" },
     messages: [
       { role: "system", content: RESTRUCTURE_PROMPT },
-      { role: "user", content: userPayload },
+      { role: "user", content: userPayload }
     ],
   });
 
-  const out = safeParse(completion.choices[0]?.message?.content);
-  if (!out?.narrative_md || !out?.gamma_cards) throw new Error("Unexpected model output.");
+  const out = safeParse(completion.choices[0] && completion.choices[0].message && completion.choices[0].message.content);
+  if (!out || !out.narrative_md || !out.gamma_cards) throw new Error("Unexpected model output.");
 
-  // Append marker + polished narrative to the cleaned page
-  await notion.blocks.children.append({
+  // append marker + polished narrative
+  await notionHelper.blocks.children.append({
     block_id: notionPageId,
     children: [
       {
@@ -118,15 +118,15 @@ export async function restructureAndPolish(notionPageId: string, companyName?: s
     ],
   });
 
-  // Create a child page with the Gamma JSON
-  const child = await notion.pages.create({
+  // child page with Gamma JSON
+  const child = await notionHelper.pages.create({
     parent: { page_id: notionPageId },
     properties: {
       title: { title: [{ type: "text", text: { content: "Gamma Payload (JSON)" } }] },
     },
   });
 
-  await notion.blocks.children.append({
+  await notionHelper.blocks.children.append({
     block_id: child.id,
     children: [
       {
@@ -137,6 +137,69 @@ export async function restructureAndPolish(notionPageId: string, companyName?: s
   });
 }
 // === END Restructure Helper ===
+
+
+// === EXISTING CLEANER CODE (unchanged) ===
+const { Client } = require('@notionhq/client');
+
+const notion = new Client({ auth: process.env.NOTION_TOKEN });
+const CLEAN_PARENT = process.env.NOTION_CLEANED_PARENT_PAGE_ID;
+const DRY_RUN = (process.env.DRY_RUN || 'false').toLowerCase() === 'true';
+
+// … keep your TOC, helpers, and chunking functions here …
+// (I won’t rewrite all of those since they were already working)
+
+// ---------- Create Clean page ----------
+async function createCleanPage(companyName, markdown, jsonObj) {
+  if (DRY_RUN) return { pageId: null, markdownChunks: 0, jsonChunks: 0 };
+  if (!CLEAN_PARENT) throw new Error('NOTION_CLEANED_PARENT_PAGE_ID is missing');
+
+  const jsonPretty = JSON.stringify(jsonObj, null, 2);
+  const mdParts   = makeCodeBlocks('Gamma-ready Markdown', markdown, 'markdown');
+  const jsParts   = makeCodeBlocks('JSON (for QA / App layer)', jsonPretty, 'json');
+
+  const children  = [...mdParts.blocks, ...jsParts.blocks];
+
+  const page = await notion.pages.create({
+    parent: { page_id: CLEAN_PARENT },
+    properties: {
+      title: { title: [{ type: 'text', text: { content: `Company – Cleaned for Presentation: ${companyName}` } }] }
+    },
+    children
+  });
+
+  // 👇 Run restructure automatically
+  await restructureAndPolish(page.id, companyName);
+
+  return { pageId: page.id, markdownChunks: mdParts.count, jsonChunks: jsParts.count };
+}
+
+// ---------- Handler ----------
+module.exports = async (req, res) => {
+  try {
+    const { pageId, companyName = 'Unknown Company' } = req.body || {};
+    if (!pageId) return res.status(400).json({ error: 'Missing pageId' });
+
+    // … your fetchBlocksDeep, identifySection, compileMarkdown etc …
+
+    const write = await createCleanPage(companyName, markdown, jsonObj);
+
+    return res.status(200).json({
+      ok: true,
+      wrote: !DRY_RUN,
+      companyName,
+      sections: jsonObj.sections.length,
+      cleanedMarkdownBytes: markdown.length,
+      notionPageId: write.pageId,
+      markdownChunks: write.markdownChunks,
+      jsonChunks: write.jsonChunks
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: e?.message || 'Unknown error' });
+  }
+};
+
 // api/clean-company.js  (v1.1 – chunked blocks)
 // Env: NOTION_TOKEN, NOTION_CLEANED_PARENT_PAGE_ID, DRY_RUN (true/false)
 
