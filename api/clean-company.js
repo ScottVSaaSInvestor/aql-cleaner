@@ -1,3 +1,142 @@
+// === BEGIN Restructure Helper (paste at very top of your cleaner file) ===
+import { Client } from "@notionhq/client";
+import OpenAI from "openai";
+
+const notion = new Client({ auth: process.env.NOTION_TOKEN });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const RESTRUCTURE_PROMPT = `
+You receive multiple "Gamma-ready Markdown (Part X of 19)" chunks.
+Rebuild them into a single investor-ready narrative using this exact order:
+
+- Company Snapshot
+- Executive Summary
+- Product Overview
+- Vertical Specificity
+- ICP Analysis
+- Customer Jobs to Be Done
+- Customer Success Stories
+- Market Overview
+- TAM / SAM / SOM
+- Competitive Analysis
+- Control Points Analysis
+  - Data Gravity
+  - Workflow Gravity
+  - Account Gravity
+  - Network Effects
+  - Ecosystem Control Points
+  - Product Extension
+  - Final Control Points Conclusions
+- Final Score & Classification
+
+Rules:
+- Remove labels like "Gamma-ready Markdown (Part X of 19)" and any "=== SECTION ===".
+- Keep ALL substance and metrics. Smooth transitions. Use clean Markdown headings (##, ###).
+- Return ONE JSON object with exactly these keys:
+{
+  "narrative_md": "<full polished markdown>",
+  "gamma_cards": [
+    { "section": "<Section Title>", "content_md": "<markdown>" }
+  ]
+}
+`;
+
+function safeParse(s?: string | null) { try { return s ? JSON.parse(s) : null; } catch { return null; } }
+
+async function collectAllBlocks(blockId: string) {
+  let results: any[] = [];
+  let cursor: string | undefined;
+  do {
+    const r: any = await notion.blocks.children.list({ block_id: blockId, start_cursor: cursor, page_size: 100 });
+    results.push(...r.results);
+    cursor = r.has_more ? r.next_cursor : undefined;
+  } while (cursor);
+  return results;
+}
+
+// Main helper you’ll call later
+export async function restructureAndPolish(notionPageId: string, companyName?: string) {
+  // Skip if we already added a "Restructured ✅" marker
+  const existing = await collectAllBlocks(notionPageId);
+  const already = existing.some(
+    b => b.type === "callout" &&
+         b.callout?.rich_text?.some((t:any) => t.plain_text?.includes("Restructured ✅"))
+  );
+  if (already) return;
+
+  // Gather all Markdown code blocks (the 19 parts)
+  const parts: string[] = [];
+  for (const b of existing) {
+    if (b.type === "code" && b.code?.language === "markdown") {
+      const text = (b.code.rich_text || []).map((t:any) => t.plain_text).join("");
+      if (text?.trim()) parts.push(text.trim());
+    }
+  }
+  if (parts.length === 0) return;
+
+  // Ask the model to rebuild + polish
+  const userPayload = [
+    companyName ? `Company: ${companyName}` : "",
+    "Input parts (in captured order):",
+    ...parts.map((p, i) => `\n---\n[Part ${i + 1}]\n${p}`),
+  ].join("\n");
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.2,
+    response_format: { type: "json_object" as any },
+    messages: [
+      { role: "system", content: RESTRUCTURE_PROMPT },
+      { role: "user", content: userPayload },
+    ],
+  });
+
+  const out = safeParse(completion.choices[0]?.message?.content);
+  if (!out?.narrative_md || !out?.gamma_cards) throw new Error("Unexpected model output.");
+
+  // Append marker + polished narrative to the cleaned page
+  await notion.blocks.children.append({
+    block_id: notionPageId,
+    children: [
+      {
+        type: "callout",
+        callout: {
+          icon: { type: "emoji", emoji: "🏷️" },
+          rich_text: [{ type: "text", text: { content: "Restructured ✅" } }],
+          color: "green_background",
+        },
+      },
+      { type: "divider", divider: {} },
+      {
+        type: "heading_2",
+        heading_2: { rich_text: [{ type: "text", text: { content: "Polished Narrative" } }] },
+      },
+      {
+        type: "code",
+        code: { language: "markdown", rich_text: [{ type: "text", text: { content: out.narrative_md } }] },
+      },
+    ],
+  });
+
+  // Create a child page with the Gamma JSON
+  const child = await notion.pages.create({
+    parent: { page_id: notionPageId },
+    properties: {
+      title: { title: [{ type: "text", text: { content: "Gamma Payload (JSON)" } }] },
+    },
+  });
+
+  await notion.blocks.children.append({
+    block_id: child.id,
+    children: [
+      {
+        type: "code",
+        code: { language: "json", rich_text: [{ type: "text", text: { content: JSON.stringify(out.gamma_cards, null, 2) } }] },
+      },
+    ],
+  });
+}
+// === END Restructure Helper ===
 // api/clean-company.js  (v1.1 – chunked blocks)
 // Env: NOTION_TOKEN, NOTION_CLEANED_PARENT_PAGE_ID, DRY_RUN (true/false)
 
@@ -193,6 +332,7 @@ async function createCleanPage(companyName, markdown, jsonObj) {
     },
     children
   });
+await restructureAndPolish(page.id, companyName);
 
   return { pageId: page.id, markdownChunks: mdParts.count, jsonChunks: jsParts.count };
 }
