@@ -1,386 +1,327 @@
-// api/clean-company.js  — ONE FILE, CommonJS, ready for Vercel
+// api/clean-company.js
+// FULL RIP-AND-REPLACE VERSION
+// - Fixes Notion 2000-char limit by auto-chunking long text
+// - Works with Page parent or Database parent
+// - Safe GET health check
+// - Minimal OpenAI usage (optional)
+// CommonJS for Vercel Node functions.
 
-// ---------- Dependencies & Clients ----------
-const { Client } = require("@notionhq/client");
 const OpenAI = require("openai");
+const { Client: NotionClient } = require("@notionhq/client");
 
-const notion = new Client({ auth: process.env.NOTION_TOKEN });
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// ---- ENV SETUP ----
+// OpenAI is optional (used only if useOpenAI: true in request)
+const openai =
+  process.env.OPENAI_API_KEY
+    ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    : null;
 
-const CLEAN_PARENT = process.env.NOTION_CLEANED_PARENT_PAGE_ID;
-const DRY_RUN = (process.env.DRY_RUN || "false").toLowerCase() === "true";
+// Notion is required
+const notion = new NotionClient({
+  auth: process.env.NOTION_API_KEY || process.env.NOTION_KEY || process.env.NOTION_SECRET,
+});
 
-// ---------- Guardrails ----------
-if (!process.env.NOTION_TOKEN) throw new Error("Missing NOTION_TOKEN");
-if (!process.env.OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
-if (!CLEAN_PARENT) throw new Error("Missing NOTION_CLEANED_PARENT_PAGE_ID");
+// If you prefer not to pass parentId in POST body every time, set one of these:
+//   NOTION_PARENT_ID (page or database id)  OR  NOTION_DATABASE_ID (database id)
+const DEFAULT_PARENT_ID =
+  process.env.NOTION_PARENT_ID || process.env.NOTION_DATABASE_ID || "";
 
-// ---------- Restructure + Polish (Helper) ----------
-const RESTRUCTURE_PROMPT = `
-You receive multiple "Gamma-ready Markdown (Part X of N)" chunks.
-Rebuild them into a single investor-ready narrative using this exact order:
-
-- Company Snapshot
-- Executive Summary
-- Product Overview
-- Vertical Specificity
-- ICP Analysis
-- Customer Jobs to Be Done
-- Customer Success Stories
-- Market Overview
-- TAM / SAM / SOM
-- Competitive Analysis
-- Control Points Analysis
-  - Data Gravity
-  - Workflow Gravity
-  - Account Gravity
-  - Network Effects
-  - Ecosystem Control Points
-  - Product Extension
-  - Final Control Points Conclusions
-- Final Score & Classification
-
-Rules:
-- Remove labels like "Gamma-ready Markdown (Part X of N)" and any "=== SECTION ===".
-- Keep ALL substance and metrics. Smooth transitions. Use clean Markdown headings (##, ###).
-- Return ONE JSON object with exactly these keys:
-{
-  "narrative_md": "<full polished markdown>",
-  "gamma_cards": [
-    { "section": "<Section Title>", "content_md": "<markdown>" }
-  ]
-}
-`;
-
-function safeParse(s) { try { return s ? JSON.parse(s) : null; } catch { return null; } }
-
-async function collectAllBlocks(blockId) {
-  let results = [];
-  let cursor;
-  do {
-    const r = await notion.blocks.children.list({ block_id: blockId, page_size: 100, start_cursor: cursor });
-    results = results.concat(r.results);
-    cursor = r.has_more ? r.next_cursor : undefined;
-  } while (cursor);
-  return results;
+// ---- UTILITIES ----
+function clamp(str, max) {
+  if (!str) return "";
+  return str.length <= max ? str : str.slice(0, max);
 }
 
-async function restructureAndPolish(notionPageId, companyName) {
-  // idempotency: skip if already restructured
-  const existing = await collectAllBlocks(notionPageId);
-  const already = existing.some(
-    b => b.type === "callout" &&
-         b.callout &&
-         Array.isArray(b.callout.rich_text) &&
-         b.callout.rich_text.some(t => (t.plain_text || "").includes("Restructured ✅"))
-  );
-  if (already) return;
+function sanitizeText(str) {
+  if (!str) return "";
+  // remove control chars Notion may reject (except \n \r \t)
+  return String(str).replace(/[^\x09\x0A\x0D\x20-\x7E\u00A0-\uFFFF]/g, " ");
+}
 
-  // gather the markdown code blocks (the chunked parts)
-  const parts = [];
-  for (const b of existing) {
-    if (b.type === "code" && b.code && b.code.language === "markdown") {
-      const text = (b.code.rich_text || []).map(t => t.plain_text || "").join("");
-      if (text && text.trim()) parts.push(text.trim());
+function chunkString(str, size = 2000) {
+  const out = [];
+  for (let i = 0; i < str.length; i += size) {
+    out.push(str.slice(i, i + size));
+  }
+  return out;
+}
+
+function chunkArray(arr, size = 100) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push(arr.slice(i, i + size));
+  }
+  return out;
+}
+
+// Turn long text into multiple paragraph blocks (≤2000 chars each)
+function textToParagraphBlocks(text) {
+  const clean = sanitizeText(text);
+  if (!clean) {
+    return [
+      {
+        object: "block",
+        type: "paragraph",
+        paragraph: { rich_text: [{ type: "text", text: { content: "" } }] },
+      },
+    ];
+  }
+
+  // First split on blank lines to preserve paragraphs, then chunk each paragraph
+  const paras = clean.split(/\n\s*\n/g);
+  const blocks = [];
+  for (const p of paras) {
+    const chunks = chunkString(p, 2000);
+    for (const c of chunks) {
+      blocks.push({
+        object: "block",
+        type: "paragraph",
+        paragraph: {
+          rich_text: [{ type: "text", text: { content: c } }],
+        },
+      });
     }
   }
-  if (!parts.length) return;
+  return blocks;
+}
 
-  const userPayload = [
-    companyName ? `Company: ${companyName}` : "",
-    "Input parts (in captured order):",
-    ...parts.map((p, i) => `\n---\n[Part ${i + 1}]\n${p}`)
-  ].join("\n");
-
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.2,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: RESTRUCTURE_PROMPT },
-      { role: "user", content: userPayload }
-    ],
-  });
-
-  const out = safeParse(completion.choices?.[0]?.message?.content);
-  if (!out || !out.narrative_md || !out.gamma_cards) throw new Error("Unexpected model output from restructure step.");
-
-  // append marker + polished narrative
-  await notion.blocks.children.append({
-    block_id: notionPageId,
-    children: [
+// Turn long text into multiple code blocks (≤2000 chars each)
+function textToCodeBlocks(text, language = "plain text") {
+  const clean = sanitizeText(text);
+  if (!clean) {
+    return [
       {
-        type: "callout",
-        callout: {
-          icon: { type: "emoji", emoji: "🏷️" },
-          rich_text: [{ type: "text", text: { content: "Restructured ✅" } }],
-          color: "green_background",
-        },
-      },
-      { type: "divider", divider: {} },
-      {
-        type: "heading_2",
-        heading_2: { rich_text: [{ type: "text", text: { content: "Polished Narrative" } }] },
-      },
-      {
+        object: "block",
         type: "code",
-        code: { language: "markdown", rich_text: [{ type: "text", text: { content: out.narrative_md } }] },
+        code: { language, rich_text: [{ type: "text", text: { content: "" } }] },
       },
-    ],
-  });
-
-  // child page with Gamma JSON
-  const child = await notion.pages.create({
-    parent: { page_id: notionPageId },
-    properties: {
-      title: { title: [{ type: "text", text: { content: "Gamma Payload (JSON)" } }] },
-    },
-  });
-
-  await notion.blocks.children.append({
-    block_id: child.id,
-    children: [
-      {
-        type: "code",
-        code: { language: "json", rich_text: [{ type: "text", text: { content: JSON.stringify(out.gamma_cards, null, 2) } }] },
-      },
-    ],
-  });
-}
-
-// ---------- Cleaning pipeline (RAW → structured Markdown/JSON) ----------
-const TOC = [
-  "1. Company Snapshot",
-  "2. Business Summary",
-  "3. Product Overview",
-  "4. Vertical Specificity",
-  "5. Customer Overview",
-  "6. ICP Analysis",
-  "7. Customer Jobs to Be Done",
-  "8. Customer Success Stories",
-  "9. Market Overview",
-  "10. TAM / SAM / SOM",
-  "11. Competitive Analysis",
-  "12. Competitive Market Map",
-];
-
-const CONTROL_TOC = [
-  "1. Data Gravity Analysis",
-  "2. Workflow Gravity Analysis",
-  "3. Account Gravity Analysis",
-  "4. Network Effects Analysis",
-  "5. Ecosystem Control Points Analysis",
-  "6. Product Extension Analysis",
-  "7. Final Control Points Conclusions",
-  "8. Final Total Score and Classification",
-];
-
-const keyCompany = (t) => `Company Overview:${t}`;
-const keyControl  = (t) => `Part 2: Control Points Analysis:${t}`;
-
-async function fetchAllChildren(block_id) {
-  const out = [];
-  let cursor;
-  do {
-    const res = await notion.blocks.children.list({ block_id, page_size: 100, start_cursor: cursor });
-    out.push(...res.results);
-    cursor = res.has_more ? res.next_cursor : undefined;
-  } while (cursor);
-  return out;
-}
-
-async function fetchBlocksDeep(block_id, acc = []) {
-  const kids = await fetchAllChildren(block_id);
-  for (const b of kids) {
-    acc.push(b);
-    if (b.has_children) await fetchBlocksDeep(b.id, acc);
+    ];
   }
-  return acc;
-}
-
-const rtText = (rt) => (rt || []).map(t => t.plain_text || "").join("");
-
-function blockToLines(block) {
-  const t = block.type;
-  if (t === "paragraph")           return [rtText(block.paragraph.rich_text)];
-  if (t === "bulleted_list_item")  return ["- " + rtText(block.bulleted_list_item.rich_text)];
-  if (t === "numbered_list_item")  return ["1. " + rtText(block.numbered_list_item.rich_text)];
-  if (t === "heading_1")           return ["# "   + rtText(block.heading_1.rich_text)];
-  if (t === "heading_2")           return ["## "  + rtText(block.heading_2.rich_text)];
-  if (t === "heading_3")           return ["### " + rtText(block.heading_3.rich_text)];
-  if (t === "quote")               return ["> "   + rtText(block.quote.rich_text)];
-  if (t === "callout")             return [rtText(block.callout.rich_text)];
-  if (t === "toggle")              return [rtText(block.toggle.rich_text)];
-  if (t === "to_do") {
-    const txt = rtText(block.to_do.rich_text);
-    const chk = block.to_do.checked ? "x" : " ";
-    return [`- [${chk}] ${txt}`];
-  }
-  return []; // ignore images/files/dividers
-}
-
-function stripCruft(line) {
-  let s = (line || "")
-    .replace(/^=+\s*.*?=+\s*$/g, "")                 // "=== TITLE ==="
-    .replace(/\bStep\s*\d+\b/gi, "")                 // "Step 2"
-    .replace(/\((?:\d+\s*-\s*)?\d+\s*words?\)/gi, "")// "(75–150 words)"
-    .replace(/\u00A0/g, " ")
-    .trim();
-  s = s.replace(/^###\s*Section\s*\d+\s*:?\s*/i, "").replace(/^Section\s*\d+\s*:?\s*/i, "");
-  return s;
-}
-
-function identifySection(allLines) {
-  const buckets = new Map();
-  const push = (k, txt) => { if (!txt) return; if (!buckets.has(k)) buckets.set(k, []); buckets.get(k).push(txt); };
-  const RX = [
-    [/company\s*snapshot|company[_\s-]*snap/i,                 keyCompany("1. Company Snapshot")],
-    [/business\s*summary|executive\s*summary/i,                keyCompany("2. Business Summary")],
-    [/product\s*overview|key\s*modules|value\s*proposition/i,  keyCompany("3. Product Overview")],
-    [/vertical\s*specific/i,                                   keyCompany("4. Vertical Specificity")],
-    [/customer\s*overview/i,                                   keyCompany("5. Customer Overview")],
-    [/ICP|ideal customer profile|segmentation|personas/i,      keyCompany("6. ICP Analysis")],
-    [/jobs?\s*to\s*be\s*done|JTBD/i,                           keyCompany("7. Customer Jobs to Be Done")],
-    [/customer\s*success|case\s*studies/i,                     keyCompany("8. Customer Success Stories")],
-    [/market\s*overview|market\s*context/i,                    keyCompany("9. Market Overview")],
-    [/TAM\s*\/\s*SAM\s*\/\s*SOM|market sizing/i,               keyCompany("10. TAM / SAM / SOM")],
-    [/competitive\s*analysis|competitive\s*landscape|positioning/i, keyCompany("11. Competitive Analysis")],
-    [/market\s*map/i,                                          keyCompany("12. Competitive Market Map")],
-    [/data\s*gravity/i,                                        keyControl("1. Data Gravity Analysis")],
-    [/workflow\s*gravity/i,                                    keyControl("2. Workflow Gravity Analysis")],
-    [/account\s*gravity/i,                                     keyControl("3. Account Gravity Analysis")],
-    [/network\s*effects/i,                                     keyControl("4. Network Effects Analysis")],
-    [/ecosystem\s*control/i,                                   keyControl("5. Ecosystem Control Points Analysis")],
-    [/product\s*extension/i,                                   keyControl("6. Product Extension Analysis")],
-    [/final\s*control\s*points\s*conclusions/i,                keyControl("7. Final Control Points Conclusions")],
-    [/final\s*total\s*score|classification/i,                  keyControl("8. Final Total Score and Classification")],
-  ];
-  let current = null;
-  const hit = (line) => { for (const [rx, key] of RX) if (rx.test(line)) return key; return null; };
-  for (const raw of allLines) {
-    const line = stripCruft(raw);
-    if (!line) continue;
-    const maybe = hit(line);
-    if (maybe) { current = maybe; continue; }
-    if (!current) current = keyCompany("2. Business Summary"); // safe default
-    push(current, line);
-  }
-  return buckets;
-}
-
-function compileMarkdown(buckets) {
-  const md = [];
-  md.push("# Company Overview", "");
-  for (const title of TOC) {
-    const k = keyCompany(title);
-    const body = buckets.get(k) || [];
-    if (!body.length) continue;
-    md.push(`## ${title}`); md.push(...body); md.push("---");
-  }
-  md.push("# Part 2: Control Points Analysis", "");
-  for (const title of CONTROL_TOC) {
-    const k = keyControl(title);
-    const body = buckets.get(k) || [];
-    if (!body.length) continue;
-    md.push(`## ${title}`); md.push(...body); md.push("---");
-  }
-  while (md.length && md[md.length - 1] === "---") md.pop();
-  return md.join("\n");
-}
-
-function chunkText(text, size = 1900) {
-  const out = [];
-  let i = 0;
-  while (i < text.length) {
-    let end = Math.min(i + size, text.length);
-    const nl = text.lastIndexOf("\n", end);
-    if (nl > i + 500) end = nl; // split on a newline if possible
-    out.push(text.slice(i, end));
-    i = end;
-  }
-  return out;
-}
-
-function makeCodeBlocks(title, text, lang = "markdown") {
-  const chunks = chunkText(text);
-  const blocks = [];
-  blocks.push({
+  const chunks = chunkString(clean, 2000);
+  return chunks.map((c) => ({
     object: "block",
-    type: "heading_2",
-    heading_2: { rich_text: [{ type: "text", text: { content: title } }] }
-  });
-  chunks.forEach((piece, idx) => {
-    const label = chunks.length > 1 ? ` (Part ${idx + 1} of ${chunks.length})` : "";
-    blocks.push({
-      object: "block",
-      type: "callout",
-      callout: { icon: { emoji: "🧩" }, rich_text: [{ type: "text", text: { content: `${title}${label}` } }] }
-    });
-    blocks.push({
-      object: "block",
-      type: "code",
-      code: { language: lang, rich_text: [{ type: "text", text: { content: piece } }] }
-    });
-  });
-  return { blocks, count: chunks.length };
+    type: "code",
+    code: { language, rich_text: [{ type: "text", text: { content: c } }] },
+  }));
 }
 
-// ---------- Create Clean page & run Restructure ----------
-async function createCleanPage(companyName, markdown, jsonObj) {
-  if (DRY_RUN) return { pageId: null, markdownChunks: 0, jsonChunks: 0 };
-
-  const jsonPretty = JSON.stringify(jsonObj, null, 2);
-  const mdParts = makeCodeBlocks("Gamma-ready Markdown", markdown, "markdown");
-  const jsParts = makeCodeBlocks("JSON (for QA / App layer)", jsonPretty, "json");
-  const children = [...mdParts.blocks, ...jsParts.blocks];
-
-  const page = await notion.pages.create({
-    parent: { page_id: CLEAN_PARENT }, // parent is a PAGE
-    properties: {
-      title: { title: [{ type: "text", text: { content: `Company – Cleaned for Presentation: ${companyName}` } }] }
+function headingBlock(text, level = 2) {
+  const t = clamp(sanitizeText(text), 2000);
+  const type = level === 1 ? "heading_1" : level === 3 ? "heading_3" : "heading_2";
+  return {
+    object: "block",
+    type,
+    [type]: {
+      rich_text: [{ type: "text", text: { content: t } }],
     },
-    children
-  });
-
-  await restructureAndPolish(page.id, companyName);
-
-  return { pageId: page.id, markdownChunks: mdParts.count, jsonChunks: jsParts.count };
+  };
 }
 
-// ---------- HTTP Handler ----------
-module.exports = async (req, res) => {
+// Build blocks from a simple "sections" array
+// Each section: { type: "heading"|"paragraph"|"code", text: "..." , language?: "javascript"|... }
+function buildBlocksFromSections(sections = []) {
+  const out = [];
+  for (const s of sections) {
+    const kind = (s.type || "paragraph").toLowerCase();
+    if (kind === "heading") {
+      out.push(headingBlock(s.text || ""));
+    } else if (kind === "code") {
+      out.push(...textToCodeBlocks(s.text || "", s.language || "plain text"));
+    } else {
+      out.push(...textToParagraphBlocks(s.text || ""));
+    }
+  }
+  return out;
+}
+
+// Create a Notion page with children; supports both Database or Page parent
+async function createNotionPage({ parentId, parentType, title, children }) {
+  const pageTitle = clamp(title || "Cleaned Content", 100);
+
+  // Decide parent type
+  let parent;
+  if (parentType === "database") {
+    parent = { database_id: parentId };
+  } else if (parentType === "page") {
+    parent = { page_id: parentId };
+  } else {
+    // If DEFAULT_PARENT_ID looks like a database, caller can pass parentType; otherwise default to page
+    parent = { page_id: parentId };
+  }
+
+  const initialChildren = children.slice(0, 100);
+  const remainder = children.slice(100);
+
+  // Try database first if specified, else page
+  const tryCreate = async (asDatabase) => {
+    if (asDatabase) {
+      // Most DBs use "Name" for title; allow override via env/body later if needed
+      return await notion.pages.create({
+        parent: { database_id: parentId },
+        properties: {
+          Name: {
+            title: [{ type: "text", text: { content: pageTitle } }],
+          },
+        },
+        children: initialChildren,
+      });
+    } else {
+      return await notion.pages.create({
+        parent: { page_id: parentId },
+        properties: {
+          title: {
+            title: [{ type: "text", text: { content: pageTitle } }],
+          },
+        },
+        children: initialChildren,
+      });
+    }
+  };
+
+  let page;
   try {
-    const { pageId, companyName = "Unknown Company" } = req.body || {};
-    if (!pageId) return res.status(400).json({ error: "Missing pageId" });
+    if (parent.database_id || parentType === "database") {
+      page = await tryCreate(true);
+    } else {
+      page = await tryCreate(false);
+    }
+  } catch (err) {
+    // Fallback: if database creation fails (wrong title prop), try as page parent
+    if (parentType === "database") throw err;
+    page = await tryCreate(false);
+  }
 
-    const blocks = await fetchBlocksDeep(pageId);
-    const lines  = blocks.flatMap(blockToLines).filter(Boolean);
-    const buckets = identifySection(lines);
+  // Append remaining blocks in batches of 100
+  if (remainder.length) {
+    const batches = chunkArray(remainder, 100);
+    for (const batch of batches) {
+      await notion.blocks.children.append({
+        block_id: page.id,
+        children: batch,
+      });
+    }
+  }
 
-    const markdown = compileMarkdown(buckets);
-    const jsonObj  = {
-      company: companyName,
-      sections: [
-        ...TOC.map(t => ({ scope: "Company Overview", title: t, body_md: (buckets.get(keyCompany(t)) || []).join("\n") })).filter(s => s.body_md),
-        ...CONTROL_TOC.map(t => ({ scope: "Part 2: Control Points Analysis", title: t, body_md: (buckets.get(keyControl(t)) || []).join("\n") })).filter(s => s.body_md),
-      ],
-      meta: { version: "cleaner-v1.1", generated_at: new Date().toISOString() }
-    };
+  return page;
+}
 
-    const write = await createCleanPage(companyName, markdown, jsonObj);
+// Optional: minimal polishing via OpenAI
+async function maybePolishWithOpenAI(raw, companyName) {
+  if (!openai) return raw;
+  const prompt = [
+    { role: "system", content: "You polish narrative content for investor briefs. Keep structure, improve clarity. No markdown, no headings unless provided." },
+    { role: "user", content: `Company: ${companyName || "Unknown"}\n\nText:\n${raw}` },
+  ];
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: prompt,
+    temperature: 0.2,
+  });
+  return resp.choices?.[0]?.message?.content?.trim() || raw;
+}
+
+// Safe body parsing (Vercel often gives parsed JSON already)
+function getBody(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  try {
+    return JSON.parse(req.body || "{}");
+  } catch {
+    return {};
+  }
+}
+
+// ---- HANDLER ----
+module.exports = async (req, res) => {
+  if (req.method === "GET") {
+    return res.status(200).json({ ok: true, route: "clean-company", method: "GET" });
+  }
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "GET, POST");
+    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
+  }
+
+  try {
+    const body = getBody(req);
+
+    // Inputs you can provide in the POST body:
+    // - parentId (required if no env default)
+    // - parentType: "page" | "database"  (default: "page")
+    // - title: string
+    // - companyName: string
+    // - sections: [{type:"heading"|"paragraph"|"code", text:"...", language?}]
+    // - raw: string (fallback if no sections)
+    // - useOpenAI: boolean (defaults false)
+    const parentId = body.parentId || DEFAULT_PARENT_ID;
+    const parentType = body.parentType || (process.env.NOTION_DATABASE_ID ? "database" : "page");
+
+    if (!parentId) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Missing Notion parentId. Set NOTION_PARENT_ID or NOTION_DATABASE_ID in Vercel, or include { parentId } in the POST body.",
+      });
+    }
+
+    // Build content
+    let sections = Array.isArray(body.sections) ? body.sections : null;
+
+    if (!sections && body.raw) {
+      // Minimal: one heading + a big paragraph (will be auto-chunked)
+      const text = body.useOpenAI ? await maybePolishWithOpenAI(body.raw, body.companyName) : body.raw;
+      sections = [
+        body.companyName ? { type: "heading", text: `Cleaned: ${body.companyName}` } : { type: "heading", text: "Cleaned Content" },
+        { type: "paragraph", text },
+      ];
+    }
+
+    if (!sections) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Provide content via { sections: [...] } or { raw: \"...\" }. See example in response.",
+        example: {
+          parentId: "YOUR_PAGE_OR_DB_ID",
+          parentType: "page",
+          title: "Cleaned - ExampleCo",
+          companyName: "ExampleCo",
+          useOpenAI: false,
+          sections: [
+            { type: "heading", text: "Executive Summary" },
+            { type: "paragraph", text: "This is a long paragraph that will be split into <=2000 char blocks automatically..." },
+            { type: "code", language: "plain text", text: "Optional: paste long raw here; will be chunked into code blocks." }
+          ],
+        },
+      });
+    }
+
+    const title = body.title || (body.companyName ? `Cleaned - ${body.companyName}` : "Cleaned Content");
+    const blocks = buildBlocksFromSections(sections);
+
+    const page = await createNotionPage({
+      parentId,
+      parentType,
+      title,
+      children: blocks,
+    });
+
+    // Build a friendly URL
+    const notionUrl = `https://www.notion.so/${page.id.replace(/-/g, "")}`;
 
     return res.status(200).json({
       ok: true,
-      wrote: !DRY_RUN,
-      companyName,
-      sections: jsonObj.sections.length,
-      cleanedMarkdownBytes: markdown.length,
-      notionPageId: write.pageId,
-      markdownChunks: write.markdownChunks,
-      jsonChunks: write.jsonChunks
+      pageId: page.id,
+      url: notionUrl,
+      blocksCreated: blocks.length,
+      parentTypeUsed: parentType,
     });
-  } catch (e) {
-    console.error("Cleaner error:", e);
-    return res.status(500).json({ error: e?.message || "Unknown error" });
+  } catch (err) {
+    // Surface Notion validation clearly
+    let details = String(err);
+    try {
+      if (err && err.body) {
+        details += ` | Notion body: ${err.body}`;
+      }
+    } catch {}
+    return res.status(500).json({ ok: false, error: details });
   }
 };
